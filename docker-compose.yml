@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: capsuliki-postgres
+    environment:
+      POSTGRES_DB: capsuliki
+      POSTGRES_USER: capsuliki
+      POSTGRES_PASSWORD: capsuliki
+    ports:
+      - "5432:5432"
+    volumes:
+      - capsuliki_pg_data:/var/lib/postgresql/data
+
+volumes:
+  capsuliki_pg_data:

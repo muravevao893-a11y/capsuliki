@@ -1,0 +1,134 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from enum import StrEnum
+
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, Index
+from sqlalchemy.orm import Mapped, mapped_column
+
+from app.db import Base
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class Rarity(StrEnum):
+    COMMON = "common"
+    UNCOMMON = "uncommon"
+    RARE = "rare"
+    EPIC = "epic"
+    LEGENDARY = "legendary"
+    MYTHIC = "mythic"
+
+
+class EventStatus(StrEnum):
+    ACTIVE = "active"
+    FINISHED = "finished"
+
+
+class TradeStatus(StrEnum):
+    PENDING = "pending"
+    ACCEPTED = "accepted"
+    DECLINED = "declined"
+    CANCELLED = "cancelled"
+
+
+class Player(Base):
+    __tablename__ = "players"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    telegram_user_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, index=True)
+    username: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    first_name: Mapped[str] = mapped_column(String(120), default="Игрок", nullable=False)
+
+    coins: Mapped[int] = mapped_column(Integer, default=120, nullable=False)
+    crystals: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    xp: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    level: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    daily_streak: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    capsules_opened: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_open_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    favorite_pet_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class Pet(Base):
+    __tablename__ = "pets"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    owner_player_id: Mapped[int] = mapped_column(ForeignKey("players.id"), nullable=False, index=True)
+
+    species_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    emoji: Mapped[str] = mapped_column(String(16), nullable=False)
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    rarity: Mapped[str] = mapped_column(String(24), nullable=False, index=True)
+    element: Mapped[str] = mapped_column(String(40), nullable=False)
+    character: Mapped[str] = mapped_column(String(80), nullable=False)
+    skill: Mapped[str] = mapped_column(String(160), nullable=False)
+
+    nickname: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    level: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    xp: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    power: Mapped[int] = mapped_column(Integer, default=10, nullable=False)
+
+    hunger: Mapped[int] = mapped_column(Integer, default=80, nullable=False)
+    mood: Mapped[int] = mapped_column(Integer, default=80, nullable=False)
+    clean: Mapped[int] = mapped_column(Integer, default=80, nullable=False)
+    energy: Mapped[int] = mapped_column(Integer, default=80, nullable=False)
+
+    locked: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    obtained_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class Expedition(Base):
+    __tablename__ = "expeditions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    player_id: Mapped[int] = mapped_column(ForeignKey("players.id"), nullable=False, index=True)
+    pet_id: Mapped[int] = mapped_column(ForeignKey("pets.id"), nullable=False, index=True)
+    location_key: Mapped[str] = mapped_column(String(60), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    finishes_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    result_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+
+
+class GroupEvent(Base):
+    __tablename__ = "group_events"
+    __table_args__ = (Index("ix_group_events_chat_status", "chat_id", "status"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False, index=True)
+    chat_title: Mapped[str] = mapped_column(String(255), default="Чат", nullable=False)
+    event_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default=EventStatus.ACTIVE.value, nullable=False)
+    data_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+    finishes_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Trade(Base):
+    __tablename__ = "trades"
+    __table_args__ = (Index("ix_trades_target_status", "target_player_id", "status"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    proposer_player_id: Mapped[int] = mapped_column(ForeignKey("players.id"), nullable=False, index=True)
+    target_player_id: Mapped[int] = mapped_column(ForeignKey("players.id"), nullable=False, index=True)
+    offer_pet_id: Mapped[int] = mapped_column(ForeignKey("pets.id"), nullable=False)
+    want_pet_id: Mapped[int | None] = mapped_column(ForeignKey("pets.id"), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default=TradeStatus.PENDING.value, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class ActionLog(Base):
+    __tablename__ = "action_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    player_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    action: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    text: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
