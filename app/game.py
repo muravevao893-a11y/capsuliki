@@ -483,6 +483,8 @@ def open_capsule(db: Session, player: Player, force: bool = False, capsule_type:
     capsule_name = CAPSULE_TYPES[capsule_type]["name"]
     log(db, player.id, None, "open_capsule", f"{hname(player)} получил {pet.emoji} {pet.name}")
     db.flush()
+    setattr(pet, "_drop_chance", chance)
+    setattr(pet, "_drop_title", CAPSULE_TYPES[capsule_type]["name"])
     headline = {
         "mythic": "🔴 МИФИЧЕСКИЙ ПИТОМЕЦ!",
         "legendary": "🟡 ЛЕГЕНДАРНЫЙ ПИТОМЕЦ!",
@@ -551,6 +553,8 @@ def pet_payload(pet: Pet | None) -> dict[str, Any] | None:
         "energy": pet.energy,
         "species_key": pet.species_key,
         "image_key": species.get("image"),
+        "drop_chance": getattr(pet, "_drop_chance", None),
+        "drop_title": getattr(pet, "_drop_title", None),
     }
 
 
@@ -841,6 +845,138 @@ def hit_boss(db: Session, chat_id: int, player: Player, event_id: int) -> tuple[
     event.data_json = json.dumps(data, ensure_ascii=False)
     db.flush()
     return True, text, data
+
+
+def day_start_utc() -> datetime:
+    now = utcnow()
+    return now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def _has_action_today(db: Session, player: Player, action: str | None = None, prefix: str | None = None) -> bool:
+    q = select(ActionLog.id).where(ActionLog.player_id == player.id, ActionLog.created_at >= day_start_utc())
+    if action:
+        q = q.where(ActionLog.action == action)
+    if prefix:
+        q = q.where(ActionLog.action.like(f"{prefix}%"))
+    return bool(db.scalar(q.limit(1)))
+
+
+def _claimed_today(db: Session, player: Player, action: str) -> bool:
+    return _has_action_today(db, player, action=action)
+
+
+def quest_payload(db: Session, player: Player) -> dict[str, Any]:
+    quests = [
+        {
+            "key": "open",
+            "title": "Открой 1 капсулу",
+            "done": _has_action_today(db, player, action="open_capsule"),
+            "claimed": _claimed_today(db, player, "quest_claim_open"),
+            "reward": "50 монет",
+        },
+        {
+            "key": "care",
+            "title": "Позаботься о питомце",
+            "done": _has_action_today(db, player, prefix="care_"),
+            "claimed": _claimed_today(db, player, "quest_claim_care"),
+            "reward": "20 монет",
+        },
+        {
+            "key": "expedition",
+            "title": "Отправь питомца в экспедицию",
+            "done": _has_action_today(db, player, action="expedition_start"),
+            "claimed": _claimed_today(db, player, "quest_claim_expedition"),
+            "reward": "1 кристалл",
+        },
+        {
+            "key": "catch",
+            "title": "Поймай капсулика в группе",
+            "done": _has_action_today(db, player, action="group_catch"),
+            "claimed": _claimed_today(db, player, "quest_claim_catch"),
+            "reward": "30 пыли",
+        },
+    ]
+    return {
+        "coins": player.coins,
+        "crystals": player.crystals,
+        "dust": int(getattr(player, "capsule_dust", 0) or 0),
+        "quests": quests,
+    }
+
+
+def claim_quests(db: Session, player: Player) -> tuple[bool, str, dict[str, Any]]:
+    payload = quest_payload(db, player)
+    rewards = {"coins": 0, "crystals": 0, "dust": 0}
+    claimed = []
+    for quest in payload["quests"]:
+        if not quest["done"] or quest["claimed"]:
+            continue
+        key = quest["key"]
+        if key == "open":
+            rewards["coins"] += 50
+        elif key == "care":
+            rewards["coins"] += 20
+        elif key == "expedition":
+            rewards["crystals"] += 1
+        elif key == "catch":
+            rewards["dust"] += 30
+        claimed.append(key)
+        log(db, player.id, None, f"quest_claim_{key}", "daily quest reward")
+    if not claimed:
+        return False, "Нет новых наград по заданиям.", payload
+
+    player.coins += rewards["coins"]
+    player.crystals += rewards["crystals"]
+    player.capsule_dust = int(getattr(player, "capsule_dust", 0) or 0) + rewards["dust"]
+    db.flush()
+    parts = []
+    if rewards["coins"]:
+        parts.append(f"{rewards['coins']} монет")
+    if rewards["crystals"]:
+        parts.append(f"{rewards['crystals']} кристалл")
+    if rewards["dust"]:
+        parts.append(f"{rewards['dust']} пыли")
+    return True, "Получено: " + ", ".join(parts), quest_payload(db, player)
+
+
+def daily_reward_payload(db: Session, player: Player) -> dict[str, Any]:
+    claimed = _claimed_today(db, player, "daily_reward")
+    streak = max(1, int(player.daily_streak or 1))
+    day = ((streak - 1) % 7) + 1
+    rewards = {
+        1: {"coins": 100, "crystals": 0, "dust": 0, "title": "День 1"},
+        2: {"coins": 130, "crystals": 0, "dust": 0, "title": "День 2"},
+        3: {"coins": 160, "crystals": 2, "dust": 0, "title": "День 3"},
+        4: {"coins": 190, "crystals": 2, "dust": 15, "title": "День 4"},
+        5: {"coins": 220, "crystals": 3, "dust": 20, "title": "День 5"},
+        6: {"coins": 260, "crystals": 4, "dust": 35, "title": "День 6"},
+        7: {"coins": 350, "crystals": 8, "dust": 80, "title": "День 7"},
+    }
+    return {
+        "claimed": claimed,
+        "streak": streak,
+        "day": day,
+        "reward": rewards[day],
+    }
+
+
+def claim_daily_reward(db: Session, player: Player) -> tuple[bool, str, dict[str, Any]]:
+    payload = daily_reward_payload(db, player)
+    if payload["claimed"]:
+        return False, "Ежедневная награда уже забрана.", payload
+    reward = payload["reward"]
+    player.coins += int(reward["coins"])
+    player.crystals += int(reward["crystals"])
+    player.capsule_dust = int(getattr(player, "capsule_dust", 0) or 0) + int(reward["dust"])
+    log(db, player.id, None, "daily_reward", f"daily reward day {payload['day']}")
+    db.flush()
+    parts = [f"{reward['coins']} монет"]
+    if reward["crystals"]:
+        parts.append(f"{reward['crystals']} кристаллов")
+    if reward["dust"]:
+        parts.append(f"{reward['dust']} пыли")
+    return True, "🎁 Награда получена: " + ", ".join(parts), daily_reward_payload(db, player)
+
 
 
 def admin_stats(db: Session) -> dict[str, Any]:

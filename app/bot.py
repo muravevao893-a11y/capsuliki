@@ -30,6 +30,10 @@ from app.game import (
     profile_payload,
     register_group_chat,
     admin_stats,
+    claim_daily_reward,
+    claim_quests,
+    daily_reward_payload,
+    quest_payload,
     care_pet,
     catch_group_pet,
     collection_payload,
@@ -52,6 +56,7 @@ from app.game import (
 )
 from app.models import GroupEvent, Pet, Player
 from app.pet_media import find_pet_image
+from app.cards import build_pet_card
 
 logger = logging.getLogger(__name__)
 router = Router(name="capsuliki-router")
@@ -118,6 +123,8 @@ async def setup_bot_commands(bot: Bot) -> None:
         BotCommand(command="shop", description="магазин"),
         BotCommand(command="album", description="альбом питомцев"),
         BotCommand(command="profile", description="профиль"),
+        BotCommand(command="quests", description="задания дня"),
+        BotCommand(command="daily", description="ежедневная награда"),
         BotCommand(command="my", description="коллекция"),
         BotCommand(command="pet", description="любимчик"),
         BotCommand(command="pets", description="мои питомцы"),
@@ -177,10 +184,20 @@ def is_admin_user(user_id: int | None) -> bool:
 
 def main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🎁 Открыть капсулу", callback_data="cap:open")],
-        [InlineKeyboardButton(text="📖 Альбом", callback_data="cap:album:0"), InlineKeyboardButton(text="🛒 Магазин", callback_data="cap:shop")],
-        [InlineKeyboardButton(text="👤 Профиль", callback_data="cap:profile"), InlineKeyboardButton(text="🐾 Любимчик", callback_data="cap:pet")],
-        [InlineKeyboardButton(text="🎒 Экспедиции", callback_data="cap:expeditions"), InlineKeyboardButton(text="🏆 Топ", callback_data="cap:top")],
+        [InlineKeyboardButton(text="🎁 Открыть", callback_data="cap:open")],
+        [InlineKeyboardButton(text="📖 Альбом", callback_data="cap:album:0")],
+        [InlineKeyboardButton(text="⋯ Ещё", callback_data="cap:more")],
+    ])
+
+
+def more_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👤 Профиль", callback_data="cap:profile")],
+        [InlineKeyboardButton(text="🎯 Задания", callback_data="cap:quests")],
+        [InlineKeyboardButton(text="🎁 Награда", callback_data="cap:daily")],
+        [InlineKeyboardButton(text="🛒 Магазин", callback_data="cap:shop")],
+        [InlineKeyboardButton(text="🎒 Экспедиции", callback_data="cap:expeditions")],
+        [InlineKeyboardButton(text="🏆 Топ", callback_data="cap:top")],
     ])
 
 
@@ -188,9 +205,8 @@ def main_keyboard() -> InlineKeyboardMarkup:
 def capsule_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎁 Ежедневная", callback_data="cap:open:daily")],
-        [InlineKeyboardButton(text="⚪ Обычная", callback_data="cap:open:common"), InlineKeyboardButton(text="🔵 Редкая", callback_data="cap:open:rare")],
-        [InlineKeyboardButton(text="🟣 Эпическая", callback_data="cap:open:epic"), InlineKeyboardButton(text="🟡 Легендарная", callback_data="cap:open:legendary")],
-        [InlineKeyboardButton(text="🛒 Магазин", callback_data="cap:shop"), InlineKeyboardButton(text="🏠 Меню", callback_data="cap:menu")],
+        [InlineKeyboardButton(text="🛒 Магазин", callback_data="cap:shop")],
+        [InlineKeyboardButton(text="🏠 Меню", callback_data="cap:menu")],
     ])
 
 
@@ -215,10 +231,10 @@ def album_keyboard(page: int, total: int, pet_id: int | None = None) -> InlineKe
 
 def shop_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⚪ Открыть обычную", callback_data="cap:open:common")],
-        [InlineKeyboardButton(text="🔵 Открыть редкую", callback_data="cap:open:rare")],
-        [InlineKeyboardButton(text="🟣 Открыть эпическую", callback_data="cap:open:epic")],
-        [InlineKeyboardButton(text="🟡 Открыть легендарную", callback_data="cap:open:legendary")],
+        [InlineKeyboardButton(text="⚪ Обычная", callback_data="cap:open:common")],
+        [InlineKeyboardButton(text="🔵 Редкая", callback_data="cap:open:rare")],
+        [InlineKeyboardButton(text="🟣 Эпическая", callback_data="cap:open:epic")],
+        [InlineKeyboardButton(text="🟡 Легендарная", callback_data="cap:open:legendary")],
         [InlineKeyboardButton(text="🏠 Меню", callback_data="cap:menu")],
     ])
 
@@ -226,20 +242,30 @@ def shop_keyboard() -> InlineKeyboardMarkup:
 def pet_keyboard(pet_id: int | None = None) -> InlineKeyboardMarkup:
     pid = pet_id or 0
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🍖 Покормить", callback_data=f"cap:care:feed:{pid}"), InlineKeyboardButton(text="🎮 Поиграть", callback_data=f"cap:care:play:{pid}")],
-        [InlineKeyboardButton(text="🧼 Помыть", callback_data=f"cap:care:wash:{pid}"), InlineKeyboardButton(text="🏋️ Тренировать", callback_data=f"cap:care:train:{pid}")],
-        [InlineKeyboardButton(text="💤 Уложить", callback_data=f"cap:care:sleep:{pid}")],
-        [InlineKeyboardButton(text="🎒 Экспедиции", callback_data="cap:expeditions"), InlineKeyboardButton(text="🏠 Меню", callback_data="cap:menu")],
+        [InlineKeyboardButton(text="🍖 Уход", callback_data=f"cap:care_menu:{pid}")],
+        [InlineKeyboardButton(text="🎒 Экспедиция", callback_data="cap:expeditions")],
+        [InlineKeyboardButton(text="🏠 Меню", callback_data="cap:menu")],
+    ])
+
+
+def care_keyboard(pet_id: int | None = None) -> InlineKeyboardMarkup:
+    pid = pet_id or 0
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🍖 Покормить", callback_data=f"cap:care:feed:{pid}")],
+        [InlineKeyboardButton(text="🎮 Поиграть", callback_data=f"cap:care:play:{pid}")],
+        [InlineKeyboardButton(text="🏋️ Тренировать", callback_data=f"cap:care:train:{pid}")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="cap:pet")],
     ])
 
 
 def expedition_keyboard() -> InlineKeyboardMarkup:
-    rows = []
-    for key, spec in EXPEDITIONS.items():
-        rows.append([InlineKeyboardButton(text=f"{spec['name']} · {spec['minutes']} мин", callback_data=f"cap:exp:{key}")])
-    rows.append([InlineKeyboardButton(text="✅ Забрать награду", callback_data="cap:exp_finish")])
-    rows.append([InlineKeyboardButton(text="🏠 Меню", callback_data="cap:menu")])
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🌲 Лес", callback_data="cap:exp:forest")],
+        [InlineKeyboardButton(text="🏖 Пляж", callback_data="cap:exp:beach")],
+        [InlineKeyboardButton(text="🌋 Вулкан", callback_data="cap:exp:volcano")],
+        [InlineKeyboardButton(text="✅ Забрать награду", callback_data="cap:exp_finish")],
+        [InlineKeyboardButton(text="🏠 Меню", callback_data="cap:menu")],
+    ])
 
 
 def catch_keyboard(event_id: int) -> InlineKeyboardMarkup:
@@ -311,8 +337,27 @@ def render_catch_card(winner_name: str, pet: dict[str, Any] | None) -> str:
     )
 
 
-async def answer_with_pet_media(message: Message, text: str, pet: dict[str, Any] | None, reply_markup: InlineKeyboardMarkup | None = None) -> None:
+async def answer_with_pet_media(
+    message: Message,
+    text: str,
+    pet: dict[str, Any] | None,
+    reply_markup: InlineKeyboardMarkup | None = None,
+    card_title: str | None = None,
+) -> None:
     image_path = find_pet_image((pet or {}).get("image_key") if pet else None)
+    if pet:
+        try:
+            card_path = build_pet_card(
+                pet,
+                image_path=image_path,
+                owner_name=message.from_user.username if message.from_user and message.from_user.username else None,
+                title=card_title or pet.get("drop_title") or "Капсула открыта!",
+                chance=pet.get("drop_chance"),
+            )
+            await clean_photo(message, FSInputFile(card_path), caption=text, reply_markup=reply_markup)
+            return
+        except Exception as exc:
+            store_runtime_error("card_build", exc, chat_id=message.chat.id, user_id=message.from_user.id if message.from_user else None)
     if image_path:
         await clean_photo(message, FSInputFile(image_path), caption=text, reply_markup=reply_markup)
         return
@@ -481,6 +526,53 @@ def render_admin_groups(items: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+
+def render_quests(payload: dict[str, Any]) -> str:
+    lines = ["🎯 <b>Задания на сегодня</b>", ""]
+    for quest in payload["quests"]:
+        if quest["claimed"]:
+            mark = "✅"
+        elif quest["done"]:
+            mark = "🎁"
+        else:
+            mark = "▫️"
+        lines.append(f"{mark} {h(quest['title'])} — <b>{h(quest['reward'])}</b>")
+    lines.append("")
+    lines.append("🎁 — можно забрать награду")
+    return "\n".join(lines)
+
+
+def quests_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎁 Забрать награды", callback_data="cap:quests_claim")],
+        [InlineKeyboardButton(text="🏠 Меню", callback_data="cap:menu")],
+    ])
+
+
+def render_daily(payload: dict[str, Any]) -> str:
+    reward = payload["reward"]
+    status = "уже забрана" if payload["claimed"] else "можно забрать"
+    parts = [f"{reward['coins']} монет"]
+    if reward["crystals"]:
+        parts.append(f"{reward['crystals']} кристаллов")
+    if reward["dust"]:
+        parts.append(f"{reward['dust']} пыли")
+    return (
+        "🎁 <b>Ежедневная награда</b>\n\n"
+        f"Серия: <b>{payload['streak']}</b>\n"
+        f"{reward['title']}: <b>{', '.join(parts)}</b>\n"
+        f"Статус: <b>{status}</b>"
+    )
+
+
+def daily_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎁 Забрать", callback_data="cap:daily_claim")],
+        [InlineKeyboardButton(text="🏠 Меню", callback_data="cap:menu")],
+    ])
+
+
+
 def render_stats(payload: dict[str, Any]) -> str:
     return (
         "🛠 <b>Статистика</b>\n\n"
@@ -543,6 +635,27 @@ async def cmd_shop(message: Message) -> None:
         player, _ = get_or_create_player(db, message.from_user.id, message.from_user.username, message.from_user.first_name)
         payload = shop_payload(player)
     await clean_answer(message, render_shop(payload), reply_markup=shop_keyboard())
+
+
+@router.message(Command("quests"))
+async def cmd_quests(message: Message) -> None:
+    if not message.from_user:
+        return
+    with session_scope() as db:
+        player, _ = get_or_create_player(db, message.from_user.id, message.from_user.username, message.from_user.first_name)
+        payload = quest_payload(db, player)
+    await clean_answer(message, render_quests(payload), reply_markup=quests_keyboard())
+
+
+@router.message(Command("daily"))
+async def cmd_daily(message: Message) -> None:
+    if not message.from_user:
+        return
+    with session_scope() as db:
+        player, _ = get_or_create_player(db, message.from_user.id, message.from_user.username, message.from_user.first_name)
+        payload = daily_reward_payload(db, player)
+    await clean_answer(message, render_daily(payload), reply_markup=daily_keyboard())
+
 
 
 @router.message(Command("album"))
@@ -808,6 +921,54 @@ async def cb_menu(callback: CallbackQuery) -> None:
         await clean_answer(callback.message, "🏠 <b>Меню Капсуликов</b>", reply_markup=main_keyboard())
 
 
+@router.callback_query(F.data == "cap:more")
+async def cb_more(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        await clean_answer(callback.message, "⋯ <b>Ещё</b>", reply_markup=more_keyboard())
+
+
+@router.callback_query(F.data == "cap:quests")
+async def cb_quests(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if callback.from_user and isinstance(callback.message, Message):
+        with session_scope() as db:
+            player, _ = get_or_create_player(db, callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+            payload = quest_payload(db, player)
+        await clean_answer(callback.message, render_quests(payload), reply_markup=quests_keyboard())
+
+
+@router.callback_query(F.data == "cap:quests_claim")
+async def cb_quests_claim(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if callback.from_user and isinstance(callback.message, Message):
+        with session_scope() as db:
+            player, _ = get_or_create_player(db, callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+            ok, text, payload = claim_quests(db, player)
+        await clean_answer(callback.message, ("✅ " if ok else "⛔ ") + h(text) + "\n\n" + render_quests(payload), reply_markup=quests_keyboard())
+
+
+@router.callback_query(F.data == "cap:daily")
+async def cb_daily(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if callback.from_user and isinstance(callback.message, Message):
+        with session_scope() as db:
+            player, _ = get_or_create_player(db, callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+            payload = daily_reward_payload(db, player)
+        await clean_answer(callback.message, render_daily(payload), reply_markup=daily_keyboard())
+
+
+@router.callback_query(F.data == "cap:daily_claim")
+async def cb_daily_claim(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if callback.from_user and isinstance(callback.message, Message):
+        with session_scope() as db:
+            player, _ = get_or_create_player(db, callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+            ok, text, payload = claim_daily_reward(db, player)
+        await clean_answer(callback.message, ("✅ " if ok else "⛔ ") + h(text) + "\n\n" + render_daily(payload), reply_markup=daily_keyboard())
+
+
+
 @router.callback_query(F.data == "cap:open")
 async def cb_open(callback: CallbackQuery) -> None:
     await callback.answer("Открываем…")
@@ -912,6 +1073,18 @@ async def cb_pet(callback: CallbackQuery) -> None:
             await answer_with_pet_media(callback.message, render_pet(payload), payload, reply_markup=pet_keyboard(payload["id"]))
             return
         await clean_answer(callback.message, render_pet(payload), reply_markup=pet_keyboard())
+
+
+@router.callback_query(F.data.startswith("cap:care_menu:"))
+async def cb_care_menu(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if not isinstance(callback.message, Message) or not callback.data:
+        return
+    try:
+        pet_id = int(callback.data.split(":")[-1])
+    except ValueError:
+        pet_id = 0
+    await clean_answer(callback.message, "🍖 <b>Уход за питомцем</b>", reply_markup=care_keyboard(pet_id))
 
 
 @router.callback_query(F.data.startswith("cap:care:"))
