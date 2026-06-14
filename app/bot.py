@@ -77,6 +77,7 @@ from app.game import (
     open_capsule,
     pet_info_payload,
     pet_owner_name,
+    player_limits_payload,
     player_pets_payload,
     pet_payload,
     propose_trade,
@@ -161,6 +162,8 @@ async def setup_bot_commands(bot: Bot) -> None:
         BotCommand(command="admin_set_config", description="изменить конфиг"),
         BotCommand(command="admin_config", description="конфиг админки"),
         BotCommand(command="rules", description="правила"),
+        BotCommand(command="admin_force_open", description="тестовое открытие"),
+        BotCommand(command="limits", description="мои лимиты"),
         BotCommand(command="stars", description="донат-магазин"),
         BotCommand(command="donate", description="поддержать проект"),
         BotCommand(command="season_top", description="топ сезона"),
@@ -669,6 +672,30 @@ def daily_keyboard() -> InlineKeyboardMarkup:
 
 
 
+
+def render_limits(payload: dict[str, Any]) -> str:
+    def line(title: str, item: dict[str, Any]) -> str:
+        limit = item.get("limit", 0)
+        used = item.get("used", 0)
+        if int(limit) <= 0:
+            return f"• {title}: <b>{used}</b>/∞"
+        return f"• {title}: <b>{used}</b>/<b>{limit}</b>"
+
+    lines = [
+        "⏳ <b>Лимиты на сегодня</b>",
+        "",
+        line("Ежедневная капсула", payload["free_open"]),
+        line("Платные капсулы", payload["paid_open"]),
+        line("Уход", payload["care"]),
+        line("Экспедиции", payload["expedition"]),
+        line("Ловля в группе", payload["group_catch"]),
+    ]
+    if payload.get("next_daily_open_at"):
+        lines.append("")
+        lines.append("Ежедневная капсула обновляется примерно через 20 часов после открытия.")
+    return "\n".join(lines)
+
+
 def render_referral(payload: dict[str, Any]) -> str:
     lines = [
         "🔗 <b>Приглашение друзей</b>",
@@ -1033,6 +1060,16 @@ async def cmd_help(message: Message) -> None:
 @router.message(Command("rules"))
 async def cmd_rules(message: Message) -> None:
     await clean_answer(message, render_rules(), reply_markup=main_keyboard())
+
+@router.message(Command("limits"))
+async def cmd_limits(message: Message) -> None:
+    if not message.from_user:
+        return
+    with session_scope() as db:
+        player, _ = get_or_create_player(db, message.from_user.id, message.from_user.username, message.from_user.first_name)
+        payload = player_limits_payload(db, player)
+    await clean_answer(message, render_limits(payload), reply_markup=main_keyboard())
+
 
 
 
@@ -1521,6 +1558,31 @@ async def cmd_admin_give_pet(message: Message, command: CommandObject) -> None:
         await answer_with_pet_media(message, h(text), payload, reply_markup=main_keyboard(), card_title="Админ-выдача")
         return
     await clean_answer(message, ("✅ " if ok else "⛔ ") + h(text))
+
+
+@router.message(Command("admin_force_open"))
+async def cmd_admin_force_open(message: Message, command: CommandObject) -> None:
+    if not is_admin_user(message.from_user.id if message.from_user else None):
+        return
+    parts = (command.args or "").split()
+    if not parts:
+        await clean_answer(message, "Формат: <code>/admin_force_open USER_ID [daily|rare|epic|legendary]</code>")
+        return
+    user_id = int(parts[0])
+    capsule_type = parts[1].lower() if len(parts) > 1 else "daily"
+    with session_scope() as db:
+        from sqlalchemy import select as _select
+        player = db.scalar(_select(Player).where(Player.telegram_user_id == user_id))
+        if not player:
+            await clean_answer(message, "Игрок не найден.")
+            return
+        ok, text, pet = open_capsule(db, player, force=True, capsule_type=capsule_type)
+        payload = pet_payload(pet) if pet else None
+    if ok and payload:
+        await answer_with_pet_media(message, text, payload, reply_markup=main_keyboard(), card_title="Админ-тест")
+        return
+    await clean_answer(message, ("✅ " if ok else "⛔ ") + h(text))
+
 
 
 

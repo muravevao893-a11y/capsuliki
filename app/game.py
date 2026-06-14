@@ -266,6 +266,40 @@ def _action_count_today(db: Session, player: Player, action: str | None = None, 
     return int(db.scalar(q) or 0)
 
 
+
+def open_action_name(capsule_type: str) -> str:
+    return "open_daily" if capsule_type == "daily" else "open_paid"
+
+
+def player_limits_payload(db: Session, player: Player) -> dict[str, Any]:
+    settings = get_settings()
+    return {
+        "free_open": {
+            "used": _action_count_today(db, player, "open_daily"),
+            "limit": get_config_int(db, "free_open_daily_limit", settings.free_open_daily_limit),
+        },
+        "paid_open": {
+            "used": _action_count_today(db, player, "open_paid"),
+            "limit": get_config_int(db, "paid_open_daily_limit", settings.paid_open_daily_limit),
+        },
+        "care": {
+            "used": _action_count_today(db, player, prefix="care_"),
+            "limit": get_config_int(db, "care_daily_limit", settings.care_daily_limit),
+        },
+        "expedition": {
+            "used": _action_count_today(db, player, "expedition_start"),
+            "limit": get_config_int(db, "expedition_daily_limit", settings.expedition_daily_limit),
+        },
+        "group_catch": {
+            "used": _action_count_today(db, player, "group_catch"),
+            "limit": get_config_int(db, "group_catch_daily_limit", settings.group_catch_daily_limit),
+        },
+        "last_daily_open_at": aware(player.last_open_at).isoformat() if aware(player.last_open_at) else "",
+        "next_daily_open_at": (aware(player.last_open_at) + timedelta(hours=20)).isoformat() if aware(player.last_open_at) else "",
+    }
+
+
+
 def check_daily_limit(db: Session, player: Player, action: str | None, limit: int, prefix: str | None = None) -> tuple[bool, str]:
     if limit <= 0:
         return True, ""
@@ -697,23 +731,35 @@ def create_pet_from_species(db: Session, owner: Player, species: dict[str, Any])
 
 
 def open_capsule(db: Session, player: Player, force: bool = False, capsule_type: str = "daily") -> tuple[bool, str, Pet | None]:
-    ok_ban, ban_text = require_not_banned(player)
-    if not ok_ban and not force:
-        return False, ban_text, None
-    settings = get_settings()
-    if not force:
-        limit = get_config_int(db, "free_open_daily_limit", settings.free_open_daily_limit) if capsule_type == "daily" else get_config_int(db, "paid_open_daily_limit", settings.paid_open_daily_limit)
-        ok_limit, limit_text = check_daily_limit(db, player, "open_capsule", limit)
-        if not ok_limit:
-            return False, limit_text, None
+    capsule_type = (capsule_type or "daily").strip().lower()
     if capsule_type not in CAPSULE_TYPES:
         return False, "Такой капсулы нет.", None
 
+    ok_ban, ban_text = require_not_banned(player)
+    if not ok_ban and not force:
+        return False, ban_text, None
+
     now = utcnow()
     last = aware(player.last_open_at)
+
+    # Ежедневная капсула ограничена для всех, включая админа.
+    # Обычные /open и кнопки НЕ передают force=True.
     if capsule_type == "daily" and last and not force and now < last + timedelta(hours=20):
-        left = int(((last + timedelta(hours=20)) - now).total_seconds() // 3600) + 1
-        return False, f"Капсула ещё заряжается. Осталось примерно {left} ч.", None
+        left_seconds = int(((last + timedelta(hours=20)) - now).total_seconds())
+        left_hours = max(1, left_seconds // 3600 + (1 if left_seconds % 3600 else 0))
+        return False, f"Ежедневная капсула уже открыта. Осталось примерно {left_hours} ч.", None
+
+    settings = get_settings()
+    if not force:
+        if capsule_type == "daily":
+            limit = get_config_int(db, "free_open_daily_limit", settings.free_open_daily_limit)
+            action = "open_daily"
+        else:
+            limit = get_config_int(db, "paid_open_daily_limit", settings.paid_open_daily_limit)
+            action = "open_paid"
+        ok_limit, limit_text = check_daily_limit(db, player, action, limit)
+        if not ok_limit:
+            return False, limit_text, None
 
     ok, reason = can_pay_capsule(player, capsule_type)
     if not ok and not force:
@@ -748,8 +794,10 @@ def open_capsule(db: Session, player: Player, force: bool = False, capsule_type:
     chance = capsule_drop_chance(capsule_type, rarity)
     capsule_name = CAPSULE_TYPES[capsule_type]["name"]
     add_season_score(player, {"common": 3, "uncommon": 5, "rare": 10, "epic": 25, "legendary": 70, "mythic": 180}.get(rarity, 3))
-    log(db, player.id, None, "open_capsule", f"{hname(player)} получил {pet.emoji} {pet.name}")
+    log(db, player.id, None, "open_capsule", f"{capsule_type}:{hname(player)} получил {pet.emoji} {pet.name}")
+    log(db, player.id, None, open_action_name(capsule_type), capsule_type)
     db.flush()
+
     setattr(pet, "_drop_chance", chance)
     setattr(pet, "_drop_title", CAPSULE_TYPES[capsule_type]["name"])
     headline = {
@@ -766,7 +814,7 @@ def open_capsule(db: Session, player: Player, force: bool = False, capsule_type:
         f"Стихия: <b>{pet.element}</b>\n"
         f"Характер: <b>{pet.character}</b>\n"
         f"Сила: <b>{pet.power}</b>\n"
-        f"Навык: <b>{pet.skill}</b>"
+        f"Навык: <b>{species['skill']}</b>"
         f"{duplicate_text}"
     )
     return True, text, pet
