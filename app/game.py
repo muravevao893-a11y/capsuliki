@@ -554,6 +554,49 @@ def pet_payload(pet: Pet | None) -> dict[str, Any] | None:
     }
 
 
+def pet_owner_payload(db: Session, pet: Pet | None) -> dict[str, Any] | None:
+    if not pet:
+        return None
+    owner = db.get(Player, pet.owner_player_id)
+    payload = pet_payload(pet)
+    if not payload:
+        return None
+    payload["owner"] = {
+        "id": owner.id if owner else None,
+        "name": hname(owner) if owner else "неизвестно",
+        "telegram_user_id": owner.telegram_user_id if owner else None,
+    }
+    return payload
+
+
+def pet_info_payload(db: Session, pet_id: int) -> dict[str, Any] | None:
+    pet = db.get(Pet, pet_id)
+    return pet_owner_payload(db, pet)
+
+
+def player_pets_payload(db: Session, player: Player, limit: int = 30) -> dict[str, Any]:
+    pets = db.scalars(
+        select(Pet)
+        .where(Pet.owner_player_id == player.id)
+        .order_by(desc(Pet.obtained_at))
+        .limit(limit)
+    ).all()
+    return {
+        "owner": hname(player),
+        "total": int(db.scalar(select(func.count(Pet.id)).where(Pet.owner_player_id == player.id)) or 0),
+        "items": [pet_payload(pet) for pet in pets],
+    }
+
+
+def pet_owner_name(db: Session, pet_id: int) -> str | None:
+    pet = db.get(Pet, pet_id)
+    if not pet:
+        return None
+    owner = db.get(Player, pet.owner_player_id)
+    return hname(owner) if owner else "неизвестно"
+
+
+
 def favorite_pet(db: Session, player: Player) -> Pet | None:
     if player.favorite_pet_id:
         pet = db.get(Pet, player.favorite_pet_id)
@@ -575,8 +618,10 @@ def care_pet(db: Session, player: Player, action: str, pet_id: int | None = None
     if not spec:
         return False, "Такого ухода нет.", None
     pet = db.get(Pet, pet_id) if pet_id else favorite_pet(db, player)
-    if not pet or pet.owner_player_id != player.id:
+    if not pet:
         return False, "Сначала получи питомца через /open.", None
+    if pet.owner_player_id != player.id:
+        return False, "Это не твой питомец.", None
     cost = int(spec.get("cost", 0))
     if player.coins < cost:
         return False, f"Нужно {cost} монет. У тебя {player.coins}.", pet_payload(pet)
@@ -615,8 +660,10 @@ def start_expedition(db: Session, player: Player, location_key: str, pet_id: int
     if active_expedition(db, player):
         return False, "Одна экспедиция уже идёт. Дождись возвращения.", None
     pet = db.get(Pet, pet_id) if pet_id else favorite_pet(db, player)
-    if not pet or pet.owner_player_id != player.id:
+    if not pet:
         return False, "Сначала получи питомца через /open.", None
+    if pet.owner_player_id != player.id:
+        return False, "Это не твой питомец.", None
     if pet.energy < 20:
         return False, f"{pet.emoji} {pet.name} устал. Уложи его спать.", None
     if pet.power < int(loc["min_power"]):

@@ -10,7 +10,7 @@ from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatType, ParseMode
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import CallbackQuery, ErrorEvent, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import BotCommand, CallbackQuery, ErrorEvent, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy import select
 
 from app.config import get_settings
@@ -40,6 +40,9 @@ from app.game import (
     hit_boss,
     leaderboard,
     open_capsule,
+    pet_info_payload,
+    pet_owner_name,
+    player_pets_payload,
     pet_payload,
     propose_trade,
     set_favorite,
@@ -53,6 +56,80 @@ from app.pet_media import find_pet_image
 logger = logging.getLogger(__name__)
 router = Router(name="capsuliki-router")
 BRAND = "Капсулики"
+
+LAST_BOT_MESSAGES: dict[int, int] = {}
+
+
+async def _delete_previous_bot_message(bot: Bot, chat_id: int) -> None:
+    previous_id = LAST_BOT_MESSAGES.get(chat_id)
+    if not previous_id:
+        return
+    try:
+        await bot.delete_message(chat_id, previous_id)
+    except Exception:
+        pass
+
+
+async def _delete_user_command(message: Message) -> None:
+    if not message.text or not message.text.startswith("/"):
+        return
+    if message.chat.type not in {ChatType.GROUP, ChatType.SUPERGROUP}:
+        return
+    if message.from_user and message.from_user.is_bot:
+        return
+    try:
+        await message.delete()
+    except Exception:
+        pass
+
+
+async def clean_answer(
+    message: Message,
+    text: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+    disable_web_page_preview: bool | None = None,
+) -> Message:
+    await _delete_previous_bot_message(message.bot, message.chat.id)
+    await _delete_user_command(message)
+    sent = await message.answer(text, reply_markup=reply_markup, disable_web_page_preview=disable_web_page_preview)
+    LAST_BOT_MESSAGES[message.chat.id] = sent.message_id
+    return sent
+
+
+async def clean_photo(
+    message: Message,
+    photo: FSInputFile,
+    caption: str,
+    reply_markup: InlineKeyboardMarkup | None = None,
+) -> Message:
+    await _delete_previous_bot_message(message.bot, message.chat.id)
+    await _delete_user_command(message)
+    sent = await message.answer_photo(photo, caption=caption, reply_markup=reply_markup)
+    LAST_BOT_MESSAGES[message.chat.id] = sent.message_id
+    return sent
+
+
+async def setup_bot_commands(bot: Bot) -> None:
+    commands = [
+        BotCommand(command="start", description="запуск"),
+        BotCommand(command="menu", description="меню"),
+        BotCommand(command="open", description="открыть капсулу"),
+        BotCommand(command="capsules", description="типы капсул"),
+        BotCommand(command="shop", description="магазин"),
+        BotCommand(command="album", description="альбом питомцев"),
+        BotCommand(command="profile", description="профиль"),
+        BotCommand(command="my", description="коллекция"),
+        BotCommand(command="pet", description="любимчик"),
+        BotCommand(command="pets", description="мои питомцы"),
+        BotCommand(command="petinfo", description="инфо о питомце"),
+        BotCommand(command="expedition", description="экспедиции"),
+        BotCommand(command="finish", description="забрать награду"),
+        BotCommand(command="top", description="топ игроков"),
+        BotCommand(command="trade", description="обмен"),
+        BotCommand(command="accepttrade", description="принять обмен"),
+    ]
+    await bot.set_my_commands(commands)
+
 
 
 class CallbackThrottleMiddleware(BaseMiddleware):
@@ -237,9 +314,9 @@ def render_catch_card(winner_name: str, pet: dict[str, Any] | None) -> str:
 async def answer_with_pet_media(message: Message, text: str, pet: dict[str, Any] | None, reply_markup: InlineKeyboardMarkup | None = None) -> None:
     image_path = find_pet_image((pet or {}).get("image_key") if pet else None)
     if image_path:
-        await message.answer_photo(FSInputFile(image_path), caption=text, reply_markup=reply_markup)
+        await clean_photo(message, FSInputFile(image_path), caption=text, reply_markup=reply_markup)
         return
-    await message.answer(text, reply_markup=reply_markup)
+    await clean_answer(message, text, reply_markup=reply_markup)
 
 
 def render_pet(pet: dict[str, Any] | None) -> str:
@@ -348,6 +425,40 @@ def render_profile(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+
+def render_player_pets(payload: dict[str, Any]) -> str:
+    if not payload.get("items"):
+        return "🐾 <b>Питомцев пока нет</b>\n\nОткрой капсулу: /open"
+    lines = [
+        "🐾 <b>Мои питомцы</b>",
+        "",
+        f"Владелец: <b>{h(payload['owner'])}</b>",
+        f"Всего: <b>{payload['total']}</b>",
+        "",
+    ]
+    for pet in payload["items"][:30]:
+        lines.append(f"• <code>{pet['id']}</code> {h(pet['title'])} · {pet['rarity_name']} · сила {pet['power']}")
+    lines.append("\nИнфо: <code>/petinfo ID</code>")
+    return "\n".join(lines)
+
+
+def render_pet_info(payload: dict[str, Any] | None) -> str:
+    if not payload:
+        return "🐾 Питомец не найден."
+    owner = payload.get("owner") or {}
+    return (
+        f"🐾 <b>{h(payload['title'])}</b>\n\n"
+        f"ID: <code>{payload['id']}</code>\n"
+        f"Владелец: <b>{h(owner.get('name', 'неизвестно'))}</b>\n"
+        f"Редкость: <b>{payload['rarity_name']}</b>\n"
+        f"Уровень: <b>{payload['level']}</b> · XP: <b>{payload['xp']}</b>\n"
+        f"Сила: <b>{payload['power']}</b>\n"
+        f"Стихия: <b>{h(payload['element'])}</b>\n"
+        f"Характер: <b>{h(payload['character'])}</b>\n"
+        f"Навык: <b>{h(payload['skill'])}</b>"
+    )
+
+
 def render_admin_errors(items: list[dict[str, Any]]) -> str:
     if not items:
         return "🧯 <b>Ошибки</b>\n\nЧисто."
@@ -395,14 +506,14 @@ async def get_player_from_message(message: Message) -> Player | None:
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
     if is_private(message):
-        await message.answer(render_help(), reply_markup=main_keyboard())
+        await clean_answer(message, render_help(), reply_markup=main_keyboard())
     else:
         with session_scope() as db:
             player = None
             if message.from_user and not message.from_user.is_bot:
                 player, _ = get_or_create_player(db, message.from_user.id, message.from_user.username, message.from_user.first_name)
             register_group_chat(db, message.chat.id, message.chat.title or "Чат", player)
-        await message.answer(
+        await clean_answer(message, 
             "🎁 <b>Капсулики в чате!</b>\n\n"
             "Открывай капсулы в личке или прямо здесь. Иногда в группу будут залетать редкие капсулики и боссы.",
             reply_markup=main_keyboard(),
@@ -411,17 +522,17 @@ async def cmd_start(message: Message) -> None:
 
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
-    await message.answer(render_help(), reply_markup=main_keyboard())
+    await clean_answer(message, render_help(), reply_markup=main_keyboard())
 
 
 @router.message(Command("menu"))
 async def cmd_menu(message: Message) -> None:
-    await message.answer("🏠 <b>Меню Капсуликов</b>", reply_markup=main_keyboard())
+    await clean_answer(message, "🏠 <b>Меню Капсуликов</b>", reply_markup=main_keyboard())
 
 
 @router.message(Command("capsules"))
 async def cmd_capsules(message: Message) -> None:
-    await message.answer(render_capsules(), reply_markup=capsule_keyboard())
+    await clean_answer(message, render_capsules(), reply_markup=capsule_keyboard())
 
 
 @router.message(Command("shop"))
@@ -431,7 +542,7 @@ async def cmd_shop(message: Message) -> None:
     with session_scope() as db:
         player, _ = get_or_create_player(db, message.from_user.id, message.from_user.username, message.from_user.first_name)
         payload = shop_payload(player)
-    await message.answer(render_shop(payload), reply_markup=shop_keyboard())
+    await clean_answer(message, render_shop(payload), reply_markup=shop_keyboard())
 
 
 @router.message(Command("album"))
@@ -469,7 +580,7 @@ async def cmd_open(message: Message, command: CommandObject) -> None:
     if ok and payload:
         await answer_with_pet_media(message, text, payload, reply_markup=pet_keyboard(payload["id"]))
         return
-    await message.answer(text, reply_markup=capsule_keyboard())
+    await clean_answer(message, text, reply_markup=capsule_keyboard())
 
 
 
@@ -480,7 +591,7 @@ async def cmd_my(message: Message) -> None:
     with session_scope() as db:
         player, _ = get_or_create_player(db, message.from_user.id, message.from_user.username, message.from_user.first_name)
         payload = collection_payload(db, player)
-    await message.answer(render_collection(payload), reply_markup=main_keyboard())
+    await clean_answer(message, render_collection(payload), reply_markup=main_keyboard())
 
 
 @router.message(Command("pet"))
@@ -494,7 +605,7 @@ async def cmd_pet(message: Message) -> None:
     if payload:
         await answer_with_pet_media(message, render_pet(payload), payload, reply_markup=pet_keyboard(payload["id"]))
         return
-    await message.answer(render_pet(payload), reply_markup=pet_keyboard())
+    await clean_answer(message, render_pet(payload), reply_markup=pet_keyboard())
 
 
 @router.message(Command("setfav"))
@@ -504,17 +615,17 @@ async def cmd_setfav(message: Message, command: CommandObject) -> None:
     try:
         pet_id = int((command.args or "").strip())
     except ValueError:
-        await message.answer("Нужен ID питомца: <code>/setfav 12</code>")
+        await clean_answer(message, "Нужен ID питомца: <code>/setfav 12</code>")
         return
     with session_scope() as db:
         player, _ = get_or_create_player(db, message.from_user.id, message.from_user.username, message.from_user.first_name)
         ok, text = set_favorite(db, player, pet_id)
-    await message.answer(("✅ " if ok else "⛔ ") + h(text), reply_markup=main_keyboard())
+    await clean_answer(message, ("✅ " if ok else "⛔ ") + h(text), reply_markup=main_keyboard())
 
 
 @router.message(Command("expedition"))
 async def cmd_expedition(message: Message) -> None:
-    await message.answer(render_expeditions(expedition_payload()), reply_markup=expedition_keyboard())
+    await clean_answer(message, render_expeditions(expedition_payload()), reply_markup=expedition_keyboard())
 
 
 @router.message(Command("finish"))
@@ -524,14 +635,14 @@ async def cmd_finish(message: Message) -> None:
     with session_scope() as db:
         player, _ = get_or_create_player(db, message.from_user.id, message.from_user.username, message.from_user.first_name)
         ok, text = finish_expedition(db, player)
-    await message.answer(text, reply_markup=main_keyboard())
+    await clean_answer(message, text, reply_markup=main_keyboard())
 
 
 @router.message(Command("top"))
 async def cmd_top(message: Message) -> None:
     with session_scope() as db:
         items = leaderboard(db)
-    await message.answer(render_top(items), reply_markup=main_keyboard())
+    await clean_answer(message, render_top(items), reply_markup=main_keyboard())
 
 
 @router.message(Command("profile"))
@@ -541,7 +652,30 @@ async def cmd_profile(message: Message) -> None:
     with session_scope() as db:
         player, _ = get_or_create_player(db, message.from_user.id, message.from_user.username, message.from_user.first_name)
         payload = profile_payload(db, player)
-    await message.answer(render_profile(payload), reply_markup=main_keyboard())
+    await clean_answer(message, render_profile(payload), reply_markup=main_keyboard())
+
+
+@router.message(Command("pets"))
+async def cmd_pets(message: Message) -> None:
+    if not message.from_user:
+        return
+    with session_scope() as db:
+        player, _ = get_or_create_player(db, message.from_user.id, message.from_user.username, message.from_user.first_name)
+        payload = player_pets_payload(db, player)
+    await clean_answer(message, render_player_pets(payload), reply_markup=main_keyboard())
+
+
+@router.message(Command("petinfo"))
+async def cmd_pet_info(message: Message, command: CommandObject) -> None:
+    try:
+        pet_id = int((command.args or "").strip())
+    except ValueError:
+        await clean_answer(message, "Нужен ID питомца: <code>/petinfo 12</code>", reply_markup=main_keyboard())
+        return
+    with session_scope() as db:
+        payload = pet_info_payload(db, pet_id)
+    await answer_with_pet_media(message, render_pet_info(payload), payload, reply_markup=main_keyboard())
+
 
 
 @router.message(Command("admin_errors"))
@@ -550,7 +684,7 @@ async def cmd_admin_errors(message: Message) -> None:
         return
     with session_scope() as db:
         items = admin_errors_payload(db)
-    await message.answer(render_admin_errors(items))
+    await clean_answer(message, render_admin_errors(items))
 
 
 @router.message(Command("admin_groups"))
@@ -559,7 +693,7 @@ async def cmd_admin_groups(message: Message) -> None:
         return
     with session_scope() as db:
         items = group_registry_payload(db)
-    await message.answer(render_admin_groups(items))
+    await clean_answer(message, render_admin_groups(items))
 
 
 @router.message(Command("trade"))
@@ -568,13 +702,13 @@ async def cmd_trade(message: Message, command: CommandObject) -> None:
         return
     parts = (command.args or "").split()
     if len(parts) < 2:
-        await message.answer("Обмен: <code>/trade @user PET_ID</code>")
+        await clean_answer(message, "Обмен: <code>/trade @user PET_ID</code>")
         return
     username = parts[0].lstrip("@").lower()
     try:
         pet_id = int(parts[1])
     except ValueError:
-        await message.answer("ID питомца должен быть числом.")
+        await clean_answer(message, "ID питомца должен быть числом.")
         return
     with session_scope() as db:
         proposer, _ = get_or_create_player(db, message.from_user.id, message.from_user.username, message.from_user.first_name)
@@ -582,10 +716,10 @@ async def cmd_trade(message: Message, command: CommandObject) -> None:
         players = db.scalars(select(Player)).all()
         target = next((p for p in players if (p.username or "").lower() == username), None)
         if not target:
-            await message.answer("Игрок не найден. Он должен хотя бы раз написать боту.")
+            await clean_answer(message, "Игрок не найден. Он должен хотя бы раз написать боту.")
             return
         ok, text, _trade = propose_trade(db, proposer, target, pet_id)
-    await message.answer(("✅ " if ok else "⛔ ") + h(text))
+    await clean_answer(message, ("✅ " if ok else "⛔ ") + h(text))
 
 
 @router.message(Command("accepttrade"))
@@ -595,21 +729,21 @@ async def cmd_accept_trade(message: Message, command: CommandObject) -> None:
     try:
         trade_id = int((command.args or "").strip())
     except ValueError:
-        await message.answer("Нужен ID обмена: <code>/accepttrade 3</code>")
+        await clean_answer(message, "Нужен ID обмена: <code>/accepttrade 3</code>")
         return
     with session_scope() as db:
         player, _ = get_or_create_player(db, message.from_user.id, message.from_user.username, message.from_user.first_name)
         ok, text = accept_trade(db, player, trade_id)
-    await message.answer(("✅ " if ok else "⛔ ") + h(text), reply_markup=main_keyboard())
+    await clean_answer(message, ("✅ " if ok else "⛔ ") + h(text), reply_markup=main_keyboard())
 
 
 @router.message(Command("spawn"))
 async def cmd_spawn(message: Message) -> None:
     if not is_group(message):
-        await message.answer("События спавнятся в группах.")
+        await clean_answer(message, "События спавнятся в группах.")
         return
     if not is_admin_user(message.from_user.id if message.from_user else None):
-        await message.answer("Только админ проекта.")
+        await clean_answer(message, "Только админ проекта.")
         return
     with session_scope() as db:
         group = register_group_chat(db, message.chat.id, message.chat.title or "Чат")
@@ -617,7 +751,7 @@ async def cmd_spawn(message: Message) -> None:
         mark_group_event_sent(group)
         data = __import__("json").loads(event.data_json)
         species = data["species"]
-    await message.answer(
+    await clean_answer(message, 
         f"✨ <b>В чат залетел редкий капсулик!</b>\n\n"
         f"{species['emoji']} <b>{h(species['name'])}</b>\n"
         f"Кто успеет — попробует поймать.",
@@ -628,10 +762,10 @@ async def cmd_spawn(message: Message) -> None:
 @router.message(Command("boss"))
 async def cmd_boss(message: Message) -> None:
     if not is_group(message):
-        await message.answer("Босс появляется в группах.")
+        await clean_answer(message, "Босс появляется в группах.")
         return
     if not is_admin_user(message.from_user.id if message.from_user else None):
-        await message.answer("Только админ проекта.")
+        await clean_answer(message, "Только админ проекта.")
         return
     with session_scope() as db:
         group = register_group_chat(db, message.chat.id, message.chat.title or "Чат")
@@ -639,7 +773,7 @@ async def cmd_boss(message: Message) -> None:
         mark_group_event_sent(group)
         data = __import__("json").loads(event.data_json)
         boss = data["boss"]
-    await message.answer(
+    await clean_answer(message, 
         f"🐲 <b>Босс недели появился!</b>\n\n{boss['emoji']} <b>{h(boss['name'])}</b>\nHP: <b>{boss['hp']}</b>",
         reply_markup=boss_keyboard(event.id),
     )
@@ -651,7 +785,7 @@ async def cmd_admin_stats(message: Message) -> None:
         return
     with session_scope() as db:
         payload = admin_stats(db)
-    await message.answer(render_stats(payload))
+    await clean_answer(message, render_stats(payload))
 
 
 @router.message(F.chat.type.in_({"group", "supergroup"}))
@@ -671,7 +805,7 @@ async def track_group_activity(message: Message) -> None:
 async def cb_menu(callback: CallbackQuery) -> None:
     await callback.answer()
     if isinstance(callback.message, Message):
-        await callback.message.answer("🏠 <b>Меню Капсуликов</b>", reply_markup=main_keyboard())
+        await clean_answer(callback.message, "🏠 <b>Меню Капсуликов</b>", reply_markup=main_keyboard())
 
 
 @router.callback_query(F.data == "cap:open")
@@ -685,7 +819,7 @@ async def cb_open(callback: CallbackQuery) -> None:
         if ok and payload:
             await answer_with_pet_media(callback.message, text, payload, reply_markup=pet_keyboard(payload["id"]))
             return
-        await callback.message.answer(text, reply_markup=main_keyboard())
+        await clean_answer(callback.message, text, reply_markup=main_keyboard())
 
 
 @router.callback_query(F.data.startswith("cap:open:"))
@@ -700,7 +834,7 @@ async def cb_open_typed(callback: CallbackQuery) -> None:
         if ok and payload:
             await answer_with_pet_media(callback.message, text, payload, reply_markup=pet_keyboard(payload["id"]))
             return
-        await callback.message.answer(text, reply_markup=capsule_keyboard())
+        await clean_answer(callback.message, text, reply_markup=capsule_keyboard())
 
 
 @router.callback_query(F.data == "cap:shop")
@@ -710,7 +844,7 @@ async def cb_shop(callback: CallbackQuery) -> None:
         with session_scope() as db:
             player, _ = get_or_create_player(db, callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
             payload = shop_payload(player)
-        await callback.message.answer(render_shop(payload), reply_markup=shop_keyboard())
+        await clean_answer(callback.message, render_shop(payload), reply_markup=shop_keyboard())
 
 
 @router.callback_query(F.data.startswith("cap:album:"))
@@ -739,7 +873,10 @@ async def cb_set_fav(callback: CallbackQuery) -> None:
         with session_scope() as db:
             player, _ = get_or_create_player(db, callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
             ok, text = set_favorite(db, player, pet_id)
-        await callback.message.answer(("✅ " if ok else "⛔ ") + h(text), reply_markup=main_keyboard())
+        if not ok and "нет" in text.lower():
+            await callback.answer(text, show_alert=True)
+            return
+        await clean_answer(callback.message, ("✅ " if ok else "⛔ ") + h(text), reply_markup=main_keyboard())
 
 
 
@@ -750,7 +887,7 @@ async def cb_profile(callback: CallbackQuery) -> None:
         with session_scope() as db:
             player, _ = get_or_create_player(db, callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
             payload = profile_payload(db, player)
-        await callback.message.answer(render_profile(payload), reply_markup=main_keyboard())
+        await clean_answer(callback.message, render_profile(payload), reply_markup=main_keyboard())
 
 
 @router.callback_query(F.data == "cap:my")
@@ -760,7 +897,7 @@ async def cb_my(callback: CallbackQuery) -> None:
         with session_scope() as db:
             player, _ = get_or_create_player(db, callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
             payload = collection_payload(db, player)
-        await callback.message.answer(render_collection(payload), reply_markup=main_keyboard())
+        await clean_answer(callback.message, render_collection(payload), reply_markup=main_keyboard())
 
 
 @router.callback_query(F.data == "cap:pet")
@@ -774,27 +911,31 @@ async def cb_pet(callback: CallbackQuery) -> None:
         if payload:
             await answer_with_pet_media(callback.message, render_pet(payload), payload, reply_markup=pet_keyboard(payload["id"]))
             return
-        await callback.message.answer(render_pet(payload), reply_markup=pet_keyboard())
+        await clean_answer(callback.message, render_pet(payload), reply_markup=pet_keyboard())
 
 
 @router.callback_query(F.data.startswith("cap:care:"))
 async def cb_care(callback: CallbackQuery) -> None:
-    await callback.answer()
     if not callback.from_user or not isinstance(callback.message, Message) or not callback.data:
+        await callback.answer("Не получилось.", show_alert=True)
         return
     _, _, action, raw_pet_id = callback.data.split(":")
     pet_id = int(raw_pet_id) if raw_pet_id and raw_pet_id != "0" else None
     with session_scope() as db:
         player, _ = get_or_create_player(db, callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         ok, text, payload = care_pet(db, player, action, pet_id)
-    await callback.message.answer(("✅ " if ok else "⛔ ") + h(text) + ("\n\n" + render_pet(payload) if payload else ""), reply_markup=pet_keyboard(payload["id"] if payload else None))
+    if not ok and "не твой" in text.lower():
+        await callback.answer(text, show_alert=True)
+        return
+    await callback.answer()
+    await clean_answer(callback.message, ("✅ " if ok else "⛔ ") + h(text) + ("\n\n" + render_pet(payload) if payload else ""), reply_markup=pet_keyboard(payload["id"] if payload else None))
 
 
 @router.callback_query(F.data == "cap:expeditions")
 async def cb_expeditions(callback: CallbackQuery) -> None:
     await callback.answer()
     if isinstance(callback.message, Message):
-        await callback.message.answer(render_expeditions(expedition_payload()), reply_markup=expedition_keyboard())
+        await clean_answer(callback.message, render_expeditions(expedition_payload()), reply_markup=expedition_keyboard())
 
 
 @router.callback_query(F.data.startswith("cap:exp:"))
@@ -806,7 +947,7 @@ async def cb_start_exp(callback: CallbackQuery) -> None:
     with session_scope() as db:
         player, _ = get_or_create_player(db, callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         ok, text, _ = start_expedition(db, player, key)
-    await callback.message.answer(("✅ " if ok else "⛔ ") + h(text), reply_markup=main_keyboard())
+    await clean_answer(callback.message, ("✅ " if ok else "⛔ ") + h(text), reply_markup=main_keyboard())
 
 
 @router.callback_query(F.data == "cap:exp_finish")
@@ -817,7 +958,7 @@ async def cb_exp_finish(callback: CallbackQuery) -> None:
     with session_scope() as db:
         player, _ = get_or_create_player(db, callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
         ok, text = finish_expedition(db, player)
-    await callback.message.answer(text, reply_markup=main_keyboard())
+    await clean_answer(callback.message, text, reply_markup=main_keyboard())
 
 
 @router.callback_query(F.data == "cap:top")
@@ -826,7 +967,7 @@ async def cb_top(callback: CallbackQuery) -> None:
     if isinstance(callback.message, Message):
         with session_scope() as db:
             items = leaderboard(db)
-        await callback.message.answer(render_top(items), reply_markup=main_keyboard())
+        await clean_answer(callback.message, render_top(items), reply_markup=main_keyboard())
 
 
 @router.callback_query(F.data.startswith("cap:catch:"))
@@ -843,7 +984,7 @@ async def cb_catch(callback: CallbackQuery) -> None:
     if ok and payload:
         await answer_with_pet_media(callback.message, render_catch_card(player.first_name or "Игрок", payload), payload)
         return
-    await callback.message.answer(text)
+    await clean_answer(callback.message, text)
 
 
 @router.callback_query(F.data.startswith("cap:boss_hit:"))
@@ -859,7 +1000,7 @@ async def cb_boss_hit(callback: CallbackQuery) -> None:
     hp_line = ""
     if data and data.get("hp", 0) > 0:
         hp_line = f"\nHP босса: <b>{data['hp']}</b>/<b>{data['max_hp']}</b>"
-    await callback.message.answer(text + hp_line, reply_markup=boss_keyboard(event_id) if data and data.get("hp", 0) > 0 else None)
+    await clean_answer(callback.message, text + hp_line, reply_markup=boss_keyboard(event_id) if data and data.get("hp", 0) > 0 else None)
 
 
 @router.errors()
@@ -945,6 +1086,7 @@ async def run_bot_polling() -> None:
     task: asyncio.Task | None = None
     try:
         await bot.delete_webhook(drop_pending_updates=True)
+        await setup_bot_commands(bot)
         if settings.enable_group_events:
             task = asyncio.create_task(group_event_loop(bot))
         await dp.start_polling(bot)
