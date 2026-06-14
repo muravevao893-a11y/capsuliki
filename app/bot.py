@@ -35,6 +35,10 @@ from app.game import (
     referral_payload,
     season_payload,
     season_top,
+    admin_config_payload,
+    set_config_value,
+    get_config_bool,
+    get_config_int,
     admin_health_payload,
     backup_payload,
     ban_player,
@@ -154,6 +158,9 @@ async def setup_bot_commands(bot: Bot) -> None:
         BotCommand(command="daily", description="ежедневная награда"),
         BotCommand(command="ref", description="пригласить друзей"),
         BotCommand(command="payments", description="мои оплаты"),
+        BotCommand(command="admin_set_config", description="изменить конфиг"),
+        BotCommand(command="admin_config", description="конфиг админки"),
+        BotCommand(command="rules", description="правила"),
         BotCommand(command="stars", description="донат-магазин"),
         BotCommand(command="donate", description="поддержать проект"),
         BotCommand(command="season_top", description="топ сезона"),
@@ -202,16 +209,16 @@ class SafetyMiddleware(BaseMiddleware):
                 message = event.message
 
         if user and not user.is_bot:
-            if settings.maintenance_mode and not is_admin_user(user.id):
-                if isinstance(event, CallbackQuery):
-                    await event.answer("Бот на обновлении. Скоро вернёмся.", show_alert=True)
-                    return None
-                if message:
-                    await clean_answer(message, "🛠 Бот на обновлении. Скоро вернёмся.")
-                    return None
-
             try:
                 with session_scope() as db:
+                    maintenance = settings.maintenance_mode or get_config_bool(db, "maintenance_mode", False)
+                    if maintenance and not is_admin_user(user.id):
+                        if isinstance(event, CallbackQuery):
+                            await event.answer("Бот на обновлении. Скоро вернёмся.", show_alert=True)
+                            return None
+                        if message:
+                            await clean_answer(message, "🛠 Бот на обновлении. Скоро вернёмся.")
+                            return None
                     player, _ = get_or_create_player(db, user.id, user.username, user.first_name)
                     if int(getattr(player, "is_banned", 0) or 0) == 1 and not is_admin_user(user.id):
                         reason = player.ban_reason or "без причины"
@@ -246,6 +253,17 @@ def h(value: Any) -> str:
 
 def is_group(message: Message) -> bool:
     return message.chat.type in {ChatType.GROUP, ChatType.SUPERGROUP}
+
+
+
+async def notify_admins(bot: Bot, text: str) -> None:
+    settings = get_settings()
+    for admin_id in settings.admin_ids:
+        try:
+            await bot.send_message(admin_id, text)
+        except Exception:
+            logger.debug("Could not notify admin %s", admin_id, exc_info=True)
+
 
 
 def is_private(message: Message) -> bool:
@@ -766,6 +784,7 @@ def admin_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="💰 Экономика", callback_data="admin:economy")],
         [InlineKeyboardButton(text="👥 Игроки", callback_data="admin:users")],
         [InlineKeyboardButton(text="🩺 Health", callback_data="admin:health")],
+        [InlineKeyboardButton(text="⚙️ Config", callback_data="admin:config")],
         [InlineKeyboardButton(text="⛔ Баны", callback_data="admin:banned")],
     ])
 
@@ -778,6 +797,15 @@ def render_banned_players(items: list[dict[str, Any]]) -> str:
     for item in items:
         username = f"@{item['username']}" if item.get("username") else item["name"]
         lines.append(f"• <code>{item['telegram_user_id']}</code> · <b>{h(username)}</b> · {h(item['reason'])}")
+    return "\n".join(lines)
+
+
+
+def render_admin_config(items: list[dict[str, Any]]) -> str:
+    lines = ["⚙️ <b>Runtime config</b>", ""]
+    for item in items:
+        lines.append(f"• <code>{h(item['key'])}</code> = <b>{h(item['value'])}</b> · default {h(item['default'])}")
+    lines.append("\nИзменить: <code>/admin_set_config KEY VALUE</code>")
     return "\n".join(lines)
 
 
@@ -1002,6 +1030,11 @@ async def cmd_start(message: Message, command: CommandObject) -> None:
 async def cmd_help(message: Message) -> None:
     await clean_answer(message, render_help(), reply_markup=main_keyboard())
 
+@router.message(Command("rules"))
+async def cmd_rules(message: Message) -> None:
+    await clean_answer(message, render_rules(), reply_markup=main_keyboard())
+
+
 
 @router.message(Command("menu"))
 async def cmd_menu(message: Message) -> None:
@@ -1219,6 +1252,29 @@ async def cmd_admin_health(message: Message) -> None:
     with session_scope() as db:
         payload = admin_health_payload(db)
     await clean_answer(message, render_admin_health(payload), reply_markup=admin_keyboard())
+
+
+@router.message(Command("admin_config"))
+async def cmd_admin_config(message: Message) -> None:
+    if not is_admin_user(message.from_user.id if message.from_user else None):
+        return
+    with session_scope() as db:
+        items = admin_config_payload(db)
+    await clean_answer(message, render_admin_config(items), reply_markup=admin_keyboard())
+
+
+@router.message(Command("admin_set_config"))
+async def cmd_admin_set_config(message: Message, command: CommandObject) -> None:
+    if not is_admin_user(message.from_user.id if message.from_user else None):
+        return
+    parts = (command.args or "").split(maxsplit=1)
+    if len(parts) != 2:
+        await clean_answer(message, "Формат: <code>/admin_set_config KEY VALUE</code>", reply_markup=admin_keyboard())
+        return
+    with session_scope() as db:
+        ok, text = set_config_value(db, parts[0], parts[1])
+    await clean_answer(message, ("✅ " if ok else "⛔ ") + h(text), reply_markup=admin_keyboard())
+
 
 
 @router.message(Command("admin_last_actions"))
@@ -1672,6 +1728,11 @@ async def cb_buy_stars(callback: CallbackQuery) -> None:
     if not callback.from_user or not isinstance(callback.message, Message) or not callback.data:
         await callback.answer("Не получилось.", show_alert=True)
         return
+    if callback.message.chat.type != ChatType.PRIVATE:
+        await callback.answer("Покупку лучше открыть в личке бота.", show_alert=True)
+        bot_user = await callback.message.bot.get_me()
+        await clean_answer(callback.message, f"⭐ Донат открывается в личке: @{h(bot_user.username or 'CapsulikiBot')}")
+        return
     settings = get_settings()
     if not settings.stars_enabled:
         await callback.answer("Донат пока выключен.", show_alert=True)
@@ -1941,6 +2002,14 @@ async def on_router_error(event: ErrorEvent) -> bool:
     except Exception:
         pass
     store_runtime_error("router", exc, chat_id=chat_id, user_id=user_id, update_json=update_json)
+    if get_settings().admin_notify_errors:
+        try:
+            await notify_admins(
+                event.bot,
+                f"⚠️ <b>Ошибка бота</b>\nТип: <code>{h(exc.__class__.__name__)}</code>\nChat: <code>{chat_id}</code>\nUser: <code>{user_id}</code>",
+            )
+        except Exception:
+            logger.debug("error admin notify failed", exc_info=True)
     logger.exception("Router error stored", exc_info=exc)
     return True
 
@@ -1949,9 +2018,12 @@ async def group_event_loop(bot: Bot) -> None:
     settings = get_settings()
     while True:
         try:
-            await asyncio.sleep(max(60, settings.group_event_interval_minutes * 60))
             with session_scope() as db:
-                groups = group_chats_for_events(db, limit=5, min_minutes=settings.group_event_interval_minutes)
+                runtime_interval = get_config_int(db, "group_event_interval_minutes", settings.group_event_interval_minutes)
+            await asyncio.sleep(max(60, runtime_interval * 60))
+            with session_scope() as db:
+                runtime_interval = get_config_int(db, "group_event_interval_minutes", settings.group_event_interval_minutes)
+                groups = group_chats_for_events(db, limit=5, min_minutes=runtime_interval)
                 jobs = []
                 for group in groups:
                     if group.messages_seen < 3:
@@ -2017,6 +2089,8 @@ async def cb_admin_dashboard(callback: CallbackQuery) -> None:
             await clean_answer(callback.message, render_admin_users(admin_users_payload(db)), reply_markup=admin_keyboard())
         elif key == "health":
             await clean_answer(callback.message, render_admin_health(admin_health_payload(db)), reply_markup=admin_keyboard())
+        elif key == "config":
+            await clean_answer(callback.message, render_admin_config(admin_config_payload(db)), reply_markup=admin_keyboard())
         elif key == "banned":
             await clean_answer(callback.message, render_banned_players(banned_players_payload(db)), reply_markup=admin_keyboard())
         else:
@@ -2034,6 +2108,14 @@ async def on_pre_checkout(pre_checkout: PreCheckoutQuery) -> None:
     if int(pre_checkout.total_amount) != int(product["stars"]):
         await pre_checkout.answer(ok=False, error_message="Сумма не совпадает.")
         return
+    with session_scope() as db:
+        player, _ = get_or_create_player(db, pre_checkout.from_user.id, pre_checkout.from_user.username, pre_checkout.from_user.first_name)
+        if player.id != player_id:
+            await pre_checkout.answer(ok=False, error_message="Оплата не принадлежит этому аккаунту.")
+            return
+        if int(getattr(player, "is_banned", 0) or 0) == 1:
+            await pre_checkout.answer(ok=False, error_message="Аккаунт заблокирован.")
+            return
     await pre_checkout.answer(ok=True)
 
 
@@ -2053,6 +2135,15 @@ async def on_successful_payment(message: Message) -> None:
             provider_payment_charge_id=payment.provider_payment_charge_id,
         )
     await clean_answer(message, ("✅ " if ok else "⛔ ") + h(text), reply_markup=main_keyboard())
+    if ok and get_settings().admin_notify_payments:
+        try:
+            amount = int(payment.total_amount)
+            await notify_admins(
+                message.bot,
+                f"⭐ <b>Новая оплата</b>\nИгрок: <code>{message.from_user.id}</code>\nСумма: <b>{amount}⭐</b>\n{text}",
+            )
+        except Exception:
+            logger.debug("payment admin notify failed", exc_info=True)
 
 
 

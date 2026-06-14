@@ -110,6 +110,7 @@ def init_db() -> None:
     Base.metadata.create_all(engine)
     run_light_migrations()
     record_schema_version("1.0")
+    record_schema_version("1.1")
 
 
 @contextmanager

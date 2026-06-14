@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     expedition_daily_limit: int = Field(default=5, alias="EXPEDITION_DAILY_LIMIT")
     group_catch_daily_limit: int = Field(default=10, alias="GROUP_CATCH_DAILY_LIMIT")
 
+    admin_notify_payments: bool = Field(default=True, alias="ADMIN_NOTIFY_PAYMENTS")
+    admin_notify_errors: bool = Field(default=False, alias="ADMIN_NOTIFY_ERRORS")
+
     @field_validator("admin_ids", mode="before")
     @classmethod
     def parse_admin_ids(cls, value):

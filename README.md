@@ -1,8 +1,32 @@
-# Капсулики Bot v1.0 — production hardening
+# Капсулики Bot v1.1 — launch polish and fixes
 
 **Капсулики** — Telegram-бот-игра про капсулы, коллекцию питомцев, уход, экспедиции, обмены и групповые события.
 
 В этой версии есть поддержка **10 картинок питомцев**. Когда игрок открывает капсулу или ловит питомца в групповом событии, бот отправляет **сообщение с картинкой питомца**.
+
+## Что нового в v1.1
+
+- улучшен `/start`: понятный быстрый старт без перегруза;
+- добавлен `/rules` с правилами игры;
+- добавлен runtime config без правки `.env`:
+  - `/admin_config`
+  - `/admin_set_config KEY VALUE`
+- теперь лимиты и maintenance можно менять прямо из бота;
+- runtime config влияет на:
+  - `maintenance_mode`
+  - `free_open_daily_limit`
+  - `paid_open_daily_limit`
+  - `care_daily_limit`
+  - `expedition_daily_limit`
+  - `group_catch_daily_limit`
+  - `group_event_interval_minutes`
+- исправлен баг: лимит экспедиций теперь реально применяется в `start_expedition`;
+- донат в группе теперь не пытается открывать invoice прямо в группе, а отправляет игрока в личку;
+- pre-checkout теперь проверяет бан и принадлежность платежа аккаунту;
+- админ-уведомления о донатах: `ADMIN_NOTIFY_PAYMENTS=true`;
+- опциональные уведомления об ошибках: `ADMIN_NOTIFY_ERRORS=true`;
+- добавлена таблица `app_config`;
+- schema version обновлена до `1.1`.
 
 ## Что нового в v1.0
 

@@ -11,7 +11,7 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.models import ActionLog, ErrorLog, EventStatus, Expedition, GroupChat, GroupEvent, Pet, Player, Rarity, StarPurchase, Trade, TradeStatus, utcnow
+from app.models import ActionLog, AppConfig, ErrorLog, EventStatus, Expedition, GroupChat, GroupEvent, Pet, Player, Rarity, StarPurchase, Trade, TradeStatus, utcnow
 
 
 RARITY_META: dict[str, dict[str, Any]] = {
@@ -66,6 +66,19 @@ DUPLICATE_DUST: dict[str, int] = {
     "legendary": 180,
     "mythic": 500,
 }
+
+CONFIG_KEYS: dict[str, dict[str, Any]] = {
+    "maintenance_mode": {"type": "bool", "default": "false", "title": "Maintenance mode"},
+    "free_open_daily_limit": {"type": "int", "default": "1", "title": "Free opens per day"},
+    "paid_open_daily_limit": {"type": "int", "default": "8", "title": "Paid opens per day"},
+    "care_daily_limit": {"type": "int", "default": "20", "title": "Care actions per day"},
+    "expedition_daily_limit": {"type": "int", "default": "5", "title": "Expeditions per day"},
+    "group_catch_daily_limit": {"type": "int", "default": "10", "title": "Group catches per day"},
+    "group_event_interval_minutes": {"type": "int", "default": "45", "title": "Group event interval"},
+}
+
+
+
 
 SPECIES: list[dict[str, Any]] = [
     {"key": "murkos", "emoji": "🦊", "name": "Сапфирис", "element": "небо", "rarity": "rare", "image": "pet1", "skill": "чаще приносит кристаллы из небесных мест", "chars": ["сияющий", "быстрый", "любопытный"]},
@@ -164,6 +177,69 @@ def add_season_score(player: Player, amount: int) -> None:
         return
     player.season_score = int(getattr(player, "season_score", 0) or 0) + int(amount)
 
+
+
+
+def get_config_value(db: Session, key: str, default: Any = None) -> str:
+    item = db.get(AppConfig, key)
+    if item:
+        return item.value
+    meta = CONFIG_KEYS.get(key)
+    if meta:
+        return str(meta["default"])
+    return str(default) if default is not None else ""
+
+
+def get_config_int(db: Session, key: str, default: int) -> int:
+    try:
+        return int(get_config_value(db, key, default))
+    except Exception:
+        return int(default)
+
+
+def get_config_bool(db: Session, key: str, default: bool = False) -> bool:
+    raw = str(get_config_value(db, key, "true" if default else "false")).strip().lower()
+    return raw in {"1", "true", "yes", "on", "да"}
+
+
+def set_config_value(db: Session, key: str, value: str) -> tuple[bool, str]:
+    if key not in CONFIG_KEYS:
+        return False, "Неизвестный ключ конфига."
+    meta = CONFIG_KEYS[key]
+    value = str(value).strip()
+    if meta["type"] == "int":
+        try:
+            parsed = int(value)
+        except ValueError:
+            return False, "Нужно целое число."
+        if parsed < 0:
+            return False, "Значение не может быть меньше 0."
+        value = str(parsed)
+    elif meta["type"] == "bool":
+        value = "true" if value.lower() in {"1", "true", "yes", "on", "да"} else "false"
+
+    item = db.get(AppConfig, key)
+    if not item:
+        item = AppConfig(key=key, value=value)
+        db.add(item)
+    else:
+        item.value = value
+        item.updated_at = utcnow()
+    db.flush()
+    return True, f"{key} = {value}"
+
+
+def admin_config_payload(db: Session) -> list[dict[str, Any]]:
+    result = []
+    for key, meta in CONFIG_KEYS.items():
+        result.append({
+            "key": key,
+            "title": meta["title"],
+            "type": meta["type"],
+            "value": get_config_value(db, key, meta["default"]),
+            "default": meta["default"],
+        })
+    return result
 
 
 def is_banned_player(player: Player | None) -> bool:
@@ -269,6 +345,7 @@ def admin_health_payload(db: Session) -> dict[str, Any]:
         "errors": int(db.scalar(select(func.count(ErrorLog.id))) or 0),
         "active_events": int(db.scalar(select(func.count(GroupEvent.id)).where(GroupEvent.status == EventStatus.ACTIVE.value)) or 0),
         "stars_enabled": bool(settings.stars_enabled),
+        "config": {item["key"]: item["value"] for item in admin_config_payload(db)},
     }
 
 
@@ -625,7 +702,7 @@ def open_capsule(db: Session, player: Player, force: bool = False, capsule_type:
         return False, ban_text, None
     settings = get_settings()
     if not force:
-        limit = settings.free_open_daily_limit if capsule_type == "daily" else settings.paid_open_daily_limit
+        limit = get_config_int(db, "free_open_daily_limit", settings.free_open_daily_limit) if capsule_type == "daily" else get_config_int(db, "paid_open_daily_limit", settings.paid_open_daily_limit)
         ok_limit, limit_text = check_daily_limit(db, player, "open_capsule", limit)
         if not ok_limit:
             return False, limit_text, None
@@ -811,7 +888,7 @@ def care_pet(db: Session, player: Player, action: str, pet_id: int | None = None
     ok_ban, ban_text = require_not_banned(player)
     if not ok_ban:
         return False, ban_text, None
-    ok_limit, limit_text = check_daily_limit(db, player, None, get_settings().care_daily_limit, prefix="care_")
+    ok_limit, limit_text = check_daily_limit(db, player, None, get_config_int(db, "care_daily_limit", get_settings().care_daily_limit), prefix="care_")
     if not ok_limit:
         return False, limit_text, None
     spec = CARE_ACTIONS.get(action)
@@ -854,6 +931,12 @@ def active_expedition(db: Session, player: Player) -> Expedition | None:
 
 
 def start_expedition(db: Session, player: Player, location_key: str, pet_id: int | None = None) -> tuple[bool, str, Expedition | None]:
+    ok_ban, ban_text = require_not_banned(player)
+    if not ok_ban:
+        return False, ban_text, None
+    ok_limit, limit_text = check_daily_limit(db, player, "expedition_start", get_config_int(db, "expedition_daily_limit", get_settings().expedition_daily_limit))
+    if not ok_limit:
+        return False, limit_text, None
     loc = EXPEDITIONS.get(location_key)
     if not loc:
         return False, "Такой экспедиции нет.", None
@@ -989,7 +1072,7 @@ def catch_group_pet(db: Session, chat_id: int, player: Player, event_id: int) ->
     ok_ban, ban_text = require_not_banned(player)
     if not ok_ban:
         return False, ban_text, None
-    ok_limit, limit_text = check_daily_limit(db, player, "group_catch", get_settings().group_catch_daily_limit)
+    ok_limit, limit_text = check_daily_limit(db, player, "group_catch", get_config_int(db, "group_catch_daily_limit", get_settings().group_catch_daily_limit))
     if not ok_limit:
         return False, limit_text, None
     event = db.get(GroupEvent, event_id)

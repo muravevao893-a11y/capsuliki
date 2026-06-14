@@ -187,6 +187,15 @@ class StarPurchase(Base):
 
 
 
+
+class AppConfig(Base):
+    __tablename__ = "app_config"
+
+    key: Mapped[str] = mapped_column(String(80), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
 class SchemaVersion(Base):
     __tablename__ = "schema_versions"
 
