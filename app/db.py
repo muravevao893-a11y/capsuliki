@@ -70,7 +70,12 @@ def run_light_migrations() -> None:
     if "players" not in inspector.get_table_names():
         return
     _add_column_if_missing("players", "capsule_dust", "capsule_dust INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing("players", "season_score", "season_score INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing("players", "referrals_count", "referrals_count INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing("players", "referrer_player_id", "referrer_player_id INTEGER")
     _create_index_if_missing("ix_players_tg", "CREATE INDEX IF NOT EXISTS ix_players_tg ON players (telegram_user_id)")
+    _create_index_if_missing("ix_players_referrer", "CREATE INDEX IF NOT EXISTS ix_players_referrer ON players (referrer_player_id)")
+    _create_index_if_missing("ix_players_season_score", "CREATE INDEX IF NOT EXISTS ix_players_season_score ON players (season_score)")
     _create_index_if_missing("ix_pets_owner", "CREATE INDEX IF NOT EXISTS ix_pets_owner ON pets (owner_player_id)")
     _create_index_if_missing("ix_events_chat", "CREATE INDEX IF NOT EXISTS ix_group_events_chat ON group_events (chat_id, status)")
     _create_index_if_missing("ix_logs_created", "CREATE INDEX IF NOT EXISTS ix_action_logs_created ON action_logs (created_at)")

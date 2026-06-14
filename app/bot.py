@@ -29,6 +29,12 @@ from app.game import (
     mark_group_event_sent,
     profile_payload,
     register_group_chat,
+    admin_give_currency,
+    admin_give_pet,
+    apply_referral,
+    referral_payload,
+    season_payload,
+    season_top,
     admin_stats,
     claim_daily_reward,
     claim_quests,
@@ -125,6 +131,9 @@ async def setup_bot_commands(bot: Bot) -> None:
         BotCommand(command="profile", description="профиль"),
         BotCommand(command="quests", description="задания дня"),
         BotCommand(command="daily", description="ежедневная награда"),
+        BotCommand(command="ref", description="пригласить друзей"),
+        BotCommand(command="season_top", description="топ сезона"),
+        BotCommand(command="season", description="сезон"),
         BotCommand(command="my", description="коллекция"),
         BotCommand(command="pet", description="любимчик"),
         BotCommand(command="pets", description="мои питомцы"),
@@ -195,6 +204,8 @@ def more_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="👤 Профиль", callback_data="cap:profile")],
         [InlineKeyboardButton(text="🎯 Задания", callback_data="cap:quests")],
         [InlineKeyboardButton(text="🎁 Награда", callback_data="cap:daily")],
+        [InlineKeyboardButton(text="🌙 Сезон", callback_data="cap:season")],
+        [InlineKeyboardButton(text="🔗 Пригласить", callback_data="cap:ref")],
         [InlineKeyboardButton(text="🛒 Магазин", callback_data="cap:shop")],
         [InlineKeyboardButton(text="🎒 Экспедиции", callback_data="cap:expeditions")],
         [InlineKeyboardButton(text="🏆 Топ", callback_data="cap:top")],
@@ -573,6 +584,65 @@ def daily_keyboard() -> InlineKeyboardMarkup:
 
 
 
+
+def render_referral(payload: dict[str, Any]) -> str:
+    lines = [
+        "🔗 <b>Приглашение друзей</b>",
+        "",
+        f"Твоя ссылка:",
+        f"<code>{h(payload['link'])}</code>",
+        "",
+        f"Приглашено: <b>{payload['referrals_count']}</b>",
+        "",
+        "Награды:",
+    ]
+    for item in payload["rewards"]:
+        done = "✅" if payload["referrals_count"] >= item["need"] else "▫️"
+        lines.append(f"{done} {h(item['title'])} — {h(item['reward'])}")
+    return "\n".join(lines)
+
+
+def render_season(payload: dict[str, Any]) -> str:
+    season = payload["season"]
+    rank = payload["rank"] or "—"
+    return (
+        f"{season['name']}\n\n"
+        f"{h(season['description'])}\n"
+        f"Длительность: <b>{season['days']} дней</b>\n\n"
+        f"Игрок: <b>{h(payload['player'])}</b>\n"
+        f"Очки сезона: <b>{payload['score']}</b>\n"
+        f"Место: <b>{rank}</b>\n"
+        f"Коллекция: <b>{payload['collected_species']}</b>/<b>{payload['collection_total']}</b>\n"
+        f"Питомцев всего: <b>{payload['pets_total']}</b>\n"
+        f"Приглашений: <b>{payload['referrals_count']}</b>"
+    )
+
+
+def render_season_top(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return "🏆 <b>Топ сезона</b>\n\nПока пусто."
+    lines = ["🏆 <b>Топ сезона</b>", ""]
+    for i, item in enumerate(items, 1):
+        lines.append(
+            f"{i}. <b>{h(item['name'])}</b> — {item['score']} очков · капсул {item['opened']} · реф {item['referrals']}"
+        )
+    return "\n".join(lines)
+
+
+def season_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏆 Топ сезона", callback_data="cap:season_top")],
+        [InlineKeyboardButton(text="🏠 Меню", callback_data="cap:menu")],
+    ])
+
+
+def ref_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏠 Меню", callback_data="cap:menu")],
+    ])
+
+
+
 def render_stats(payload: dict[str, Any]) -> str:
     return (
         "🛠 <b>Статистика</b>\n\n"
@@ -596,9 +666,25 @@ async def get_player_from_message(message: Message) -> Player | None:
 
 
 @router.message(CommandStart())
-async def cmd_start(message: Message) -> None:
+async def cmd_start(message: Message, command: CommandObject) -> None:
+    ref_text = ""
+    ref_id = None
+    raw_args = (command.args or "").strip() if command else ""
+    if raw_args.startswith("ref_"):
+        try:
+            ref_id = int(raw_args.replace("ref_", "", 1))
+        except ValueError:
+            ref_id = None
+
     if is_private(message):
-        await clean_answer(message, render_help(), reply_markup=main_keyboard())
+        if message.from_user and not message.from_user.is_bot:
+            with session_scope() as db:
+                player, created = get_or_create_player(db, message.from_user.id, message.from_user.username, message.from_user.first_name)
+                if created and ref_id:
+                    ok, ref_text = apply_referral(db, player, ref_id)
+                    if ok:
+                        ref_text = "\n\n" + ref_text
+        await clean_answer(message, render_help() + h(ref_text), reply_markup=main_keyboard())
     else:
         with session_scope() as db:
             player = None
@@ -613,6 +699,7 @@ async def cmd_start(message: Message) -> None:
 
 
 @router.message(Command("help"))
+
 async def cmd_help(message: Message) -> None:
     await clean_answer(message, render_help(), reply_markup=main_keyboard())
 
@@ -655,6 +742,35 @@ async def cmd_daily(message: Message) -> None:
         player, _ = get_or_create_player(db, message.from_user.id, message.from_user.username, message.from_user.first_name)
         payload = daily_reward_payload(db, player)
     await clean_answer(message, render_daily(payload), reply_markup=daily_keyboard())
+
+
+@router.message(Command("ref"))
+async def cmd_ref(message: Message) -> None:
+    if not message.from_user:
+        return
+    bot_user = await message.bot.get_me()
+    with session_scope() as db:
+        player, _ = get_or_create_player(db, message.from_user.id, message.from_user.username, message.from_user.first_name)
+        payload = referral_payload(player, bot_user.username)
+    await clean_answer(message, render_referral(payload), reply_markup=ref_keyboard())
+
+
+@router.message(Command("season"))
+async def cmd_season(message: Message) -> None:
+    if not message.from_user:
+        return
+    with session_scope() as db:
+        player, _ = get_or_create_player(db, message.from_user.id, message.from_user.username, message.from_user.first_name)
+        payload = season_payload(db, player)
+    await clean_answer(message, render_season(payload), reply_markup=season_keyboard())
+
+
+@router.message(Command("season_top"))
+async def cmd_season_top(message: Message) -> None:
+    with session_scope() as db:
+        items = season_top(db)
+    await clean_answer(message, render_season_top(items), reply_markup=season_keyboard())
+
 
 
 
@@ -807,6 +923,63 @@ async def cmd_admin_groups(message: Message) -> None:
     with session_scope() as db:
         items = group_registry_payload(db)
     await clean_answer(message, render_admin_groups(items))
+
+
+@router.message(Command("admin_give_coins"))
+async def cmd_admin_give_coins(message: Message, command: CommandObject) -> None:
+    if not is_admin_user(message.from_user.id if message.from_user else None):
+        return
+    parts = (command.args or "").split()
+    if len(parts) != 2:
+        await clean_answer(message, "Формат: <code>/admin_give_coins USER_ID 1000</code>")
+        return
+    with session_scope() as db:
+        ok, text = admin_give_currency(db, int(parts[0]), "coins", int(parts[1]))
+    await clean_answer(message, ("✅ " if ok else "⛔ ") + h(text))
+
+
+@router.message(Command("admin_give_crystals"))
+async def cmd_admin_give_crystals(message: Message, command: CommandObject) -> None:
+    if not is_admin_user(message.from_user.id if message.from_user else None):
+        return
+    parts = (command.args or "").split()
+    if len(parts) != 2:
+        await clean_answer(message, "Формат: <code>/admin_give_crystals USER_ID 50</code>")
+        return
+    with session_scope() as db:
+        ok, text = admin_give_currency(db, int(parts[0]), "crystals", int(parts[1]))
+    await clean_answer(message, ("✅ " if ok else "⛔ ") + h(text))
+
+
+@router.message(Command("admin_give_dust"))
+async def cmd_admin_give_dust(message: Message, command: CommandObject) -> None:
+    if not is_admin_user(message.from_user.id if message.from_user else None):
+        return
+    parts = (command.args or "").split()
+    if len(parts) != 2:
+        await clean_answer(message, "Формат: <code>/admin_give_dust USER_ID 200</code>")
+        return
+    with session_scope() as db:
+        ok, text = admin_give_currency(db, int(parts[0]), "dust", int(parts[1]))
+    await clean_answer(message, ("✅ " if ok else "⛔ ") + h(text))
+
+
+@router.message(Command("admin_give_pet"))
+async def cmd_admin_give_pet(message: Message, command: CommandObject) -> None:
+    if not is_admin_user(message.from_user.id if message.from_user else None):
+        return
+    parts = (command.args or "").split()
+    if len(parts) != 2:
+        await clean_answer(message, "Формат: <code>/admin_give_pet USER_ID pet6</code>")
+        return
+    with session_scope() as db:
+        ok, text, pet = admin_give_pet(db, int(parts[0]), parts[1])
+        payload = pet_payload(pet) if pet else None
+    if ok and payload:
+        await answer_with_pet_media(message, h(text), payload, reply_markup=main_keyboard(), card_title="Админ-выдача")
+        return
+    await clean_answer(message, ("✅ " if ok else "⛔ ") + h(text))
+
 
 
 @router.message(Command("trade"))
@@ -966,6 +1139,37 @@ async def cb_daily_claim(callback: CallbackQuery) -> None:
             player, _ = get_or_create_player(db, callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
             ok, text, payload = claim_daily_reward(db, player)
         await clean_answer(callback.message, ("✅ " if ok else "⛔ ") + h(text) + "\n\n" + render_daily(payload), reply_markup=daily_keyboard())
+
+
+@router.callback_query(F.data == "cap:ref")
+async def cb_ref(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if callback.from_user and isinstance(callback.message, Message):
+        bot_user = await callback.message.bot.get_me()
+        with session_scope() as db:
+            player, _ = get_or_create_player(db, callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+            payload = referral_payload(player, bot_user.username)
+        await clean_answer(callback.message, render_referral(payload), reply_markup=ref_keyboard())
+
+
+@router.callback_query(F.data == "cap:season")
+async def cb_season(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if callback.from_user and isinstance(callback.message, Message):
+        with session_scope() as db:
+            player, _ = get_or_create_player(db, callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+            payload = season_payload(db, player)
+        await clean_answer(callback.message, render_season(payload), reply_markup=season_keyboard())
+
+
+@router.callback_query(F.data == "cap:season_top")
+async def cb_season_top(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if isinstance(callback.message, Message):
+        with session_scope() as db:
+            items = season_top(db)
+        await clean_answer(callback.message, render_season_top(items), reply_markup=season_keyboard())
+
 
 
 

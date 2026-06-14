@@ -51,6 +51,9 @@ class Player(Base):
     capsules_opened: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     last_open_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     favorite_pet_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    referrer_player_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    referrals_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    season_score: Mapped[int] = mapped_column(Integer, default=0, nullable=False, index=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)

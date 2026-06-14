@@ -81,6 +81,13 @@ SPECIES: list[dict[str, Any]] = [
 
 SPECIES_BY_KEY: dict[str, dict[str, Any]] = {item["key"]: item for item in SPECIES}
 
+CURRENT_SEASON: dict[str, Any] = {
+    "key": "moon_01",
+    "name": "🌙 Сезон Луны",
+    "description": "Первый тестовый сезон Капсуликов.",
+    "days": 30,
+}
+
 EXPEDITIONS: dict[str, dict[str, Any]] = {
     "forest": {"name": "🌲 Лес", "minutes": 60, "min_power": 8, "coins": (20, 50), "crystals": (0, 1)},
     "beach": {"name": "🏖 Пляж", "minutes": 90, "min_power": 14, "coins": (35, 70), "crystals": (0, 2)},
@@ -120,6 +127,13 @@ def hname(player: Player) -> str:
 
 def log(db: Session, player_id: int | None, chat_id: int | None, action: str, text: str = "") -> None:
     db.add(ActionLog(player_id=player_id, chat_id=chat_id, action=action, text=text[:2000]))
+
+
+
+def add_season_score(player: Player, amount: int) -> None:
+    if amount <= 0:
+        return
+    player.season_score = int(getattr(player, "season_score", 0) or 0) + int(amount)
 
 
 def log_error(
@@ -481,6 +495,7 @@ def open_capsule(db: Session, player: Player, force: bool = False, capsule_type:
 
     chance = capsule_drop_chance(capsule_type, rarity)
     capsule_name = CAPSULE_TYPES[capsule_type]["name"]
+    add_season_score(player, {"common": 3, "uncommon": 5, "rare": 10, "epic": 25, "legendary": 70, "mythic": 180}.get(rarity, 3))
     log(db, player.id, None, "open_capsule", f"{hname(player)} получил {pet.emoji} {pet.name}")
     db.flush()
     setattr(pet, "_drop_chance", chance)
@@ -716,6 +731,7 @@ def finish_expedition(db: Session, player: Player) -> tuple[bool, str]:
     exp.result_json = json.dumps({"coins": coins + bonus, "crystals": crystals, "capsule": found_capsule}, ensure_ascii=False)
     if found_capsule:
         create_pet_from_species(db, player, choose_species(choose_rarity()))
+    add_season_score(player, 8)
     log(db, player.id, None, "expedition_finish", f"Экспедиция принесла {coins + bonus} монет")
     db.flush()
     extra = "\n🎁 Питомец нашёл ещё одну капсулу!" if found_capsule else ""
@@ -806,6 +822,7 @@ def catch_group_pet(db: Session, chat_id: int, player: Player, event_id: int) ->
         event.status = EventStatus.FINISHED.value
         data["caught_by"] = player.telegram_user_id
         event.data_json = json.dumps(data, ensure_ascii=False)
+        add_season_score(player, 20)
         log(db, player.id, chat_id, "group_catch", f"{hname(player)} поймал {pet.name}")
         db.flush()
         return True, f"✨ {hname(player)} поймал {pet.emoji} <b>{pet.name}</b>!\nРедкость: <b>{rarity_name(pet.rarity)}</b>", pet
@@ -928,6 +945,7 @@ def claim_quests(db: Session, player: Player) -> tuple[bool, str, dict[str, Any]
     player.coins += rewards["coins"]
     player.crystals += rewards["crystals"]
     player.capsule_dust = int(getattr(player, "capsule_dust", 0) or 0) + rewards["dust"]
+    add_season_score(player, len(claimed) * 4)
     db.flush()
     parts = []
     if rewards["coins"]:
@@ -968,6 +986,7 @@ def claim_daily_reward(db: Session, player: Player) -> tuple[bool, str, dict[str
     player.coins += int(reward["coins"])
     player.crystals += int(reward["crystals"])
     player.capsule_dust = int(getattr(player, "capsule_dust", 0) or 0) + int(reward["dust"])
+    add_season_score(player, 5)
     log(db, player.id, None, "daily_reward", f"daily reward day {payload['day']}")
     db.flush()
     parts = [f"{reward['coins']} монет"]
@@ -976,6 +995,132 @@ def claim_daily_reward(db: Session, player: Player) -> tuple[bool, str, dict[str
     if reward["dust"]:
         parts.append(f"{reward['dust']} пыли")
     return True, "🎁 Награда получена: " + ", ".join(parts), daily_reward_payload(db, player)
+
+
+
+def apply_referral(db: Session, new_player: Player, referrer_id: int | None) -> tuple[bool, str]:
+    if not referrer_id:
+        return False, ""
+    if new_player.referrer_player_id:
+        return False, "Реферал уже был засчитан."
+    if new_player.id == referrer_id:
+        return False, "Нельзя пригласить самого себя."
+    referrer = db.get(Player, referrer_id)
+    if not referrer:
+        return False, "Пригласивший игрок не найден."
+
+    new_player.referrer_player_id = referrer.id
+    new_player.coins += 100
+    referrer.referrals_count = int(getattr(referrer, "referrals_count", 0) or 0) + 1
+    referrer.coins += 150
+    referrer.capsule_dust = int(getattr(referrer, "capsule_dust", 0) or 0) + 25
+    add_season_score(referrer, 30)
+    add_season_score(new_player, 15)
+    log(db, new_player.id, None, "referral_join", f"referrer={referrer.id}")
+    log(db, referrer.id, None, "referral_invite", f"new_player={new_player.id}")
+    db.flush()
+    return True, f"Бонус за приглашение получен. Тебе +100 монет, пригласившему +150 монет и 25 пыли."
+
+
+def referral_payload(player: Player, bot_username: str | None = None) -> dict[str, Any]:
+    username = (bot_username or "CapsulikiBot").lstrip("@")
+    return {
+        "player_id": player.id,
+        "link": f"https://t.me/{username}?start=ref_{player.id}",
+        "referrals_count": int(getattr(player, "referrals_count", 0) or 0),
+        "rewards": [
+            {"need": 1, "title": "1 друг", "reward": "150 монет + 25 пыли"},
+            {"need": 3, "title": "3 друга", "reward": "редкая капсула"},
+            {"need": 5, "title": "5 друзей", "reward": "эпическая капсула"},
+            {"need": 10, "title": "10 друзей", "reward": "легендарная капсула"},
+        ],
+    }
+
+
+def season_payload(db: Session, player: Player) -> dict[str, Any]:
+    pets_total = int(db.scalar(select(func.count(Pet.id)).where(Pet.owner_player_id == player.id)) or 0)
+    collected_species = int(
+        db.scalar(select(func.count(func.distinct(Pet.species_key))).where(Pet.owner_player_id == player.id)) or 0
+    )
+    rank_rows = db.execute(
+        select(Player.id)
+        .order_by(desc(Player.season_score), desc(Player.capsules_opened), Player.id.asc())
+        .limit(200)
+    ).scalars().all()
+    rank = None
+    for idx, player_id in enumerate(rank_rows, 1):
+        if player_id == player.id:
+            rank = idx
+            break
+    return {
+        "season": CURRENT_SEASON,
+        "player": hname(player),
+        "score": int(getattr(player, "season_score", 0) or 0),
+        "rank": rank,
+        "pets_total": pets_total,
+        "collected_species": collected_species,
+        "collection_total": len(SPECIES),
+        "referrals_count": int(getattr(player, "referrals_count", 0) or 0),
+    }
+
+
+def season_top(db: Session, limit: int = 10) -> list[dict[str, Any]]:
+    rows = db.scalars(
+        select(Player)
+        .order_by(desc(Player.season_score), desc(Player.capsules_opened), Player.id.asc())
+        .limit(limit)
+    ).all()
+    return [
+        {
+            "name": hname(player),
+            "score": int(getattr(player, "season_score", 0) or 0),
+            "opened": player.capsules_opened,
+            "referrals": int(getattr(player, "referrals_count", 0) or 0),
+        }
+        for player in rows
+    ]
+
+
+def _species_by_alias(alias: str) -> dict[str, Any] | None:
+    raw = (alias or "").strip().lower()
+    if not raw:
+        return None
+    if raw.startswith("pet") and raw[3:].isdigit():
+        image_key = raw
+        return next((item for item in SPECIES if item.get("image") == image_key), None)
+    return SPECIES_BY_KEY.get(raw) or next((item for item in SPECIES if item["name"].lower() == raw), None)
+
+
+def admin_give_currency(db: Session, telegram_user_id: int, currency: str, amount: int) -> tuple[bool, str]:
+    player = db.scalar(select(Player).where(Player.telegram_user_id == telegram_user_id))
+    if not player:
+        return False, "Игрок не найден. Он должен хотя бы раз написать боту."
+    amount = int(amount)
+    if currency == "coins":
+        player.coins = max(0, player.coins + amount)
+    elif currency == "crystals":
+        player.crystals = max(0, player.crystals + amount)
+    elif currency == "dust":
+        player.capsule_dust = max(0, int(getattr(player, "capsule_dust", 0) or 0) + amount)
+    else:
+        return False, "Неизвестная валюта."
+    log(db, player.id, None, f"admin_give_{currency}", str(amount))
+    db.flush()
+    return True, f"Готово. {currency}: {amount:+d} для {hname(player)}."
+
+
+def admin_give_pet(db: Session, telegram_user_id: int, species_alias: str) -> tuple[bool, str, Pet | None]:
+    player = db.scalar(select(Player).where(Player.telegram_user_id == telegram_user_id))
+    if not player:
+        return False, "Игрок не найден. Он должен хотя бы раз написать боту.", None
+    species = _species_by_alias(species_alias)
+    if not species:
+        return False, "Питомец не найден. Используй pet1..pet10 или species_key.", None
+    pet = create_pet_from_species(db, player, species)
+    add_season_score(player, 50)
+    log(db, player.id, None, "admin_give_pet", species["key"])
+    db.flush()
+    return True, f"Выдан питомец: {pet.emoji} {pet.name} для {hname(player)}.", pet
 
 
 
