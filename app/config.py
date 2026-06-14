@@ -28,6 +28,13 @@ class Settings(BaseSettings):
     stars_enabled: bool = Field(default=False, alias="STARS_ENABLED")
     stars_currency: str = Field(default="XTR", alias="STARS_CURRENCY")
 
+    maintenance_mode: bool = Field(default=False, alias="MAINTENANCE_MODE")
+    free_open_daily_limit: int = Field(default=1, alias="FREE_OPEN_DAILY_LIMIT")
+    paid_open_daily_limit: int = Field(default=8, alias="PAID_OPEN_DAILY_LIMIT")
+    care_daily_limit: int = Field(default=20, alias="CARE_DAILY_LIMIT")
+    expedition_daily_limit: int = Field(default=5, alias="EXPEDITION_DAILY_LIMIT")
+    group_catch_daily_limit: int = Field(default=10, alias="GROUP_CATCH_DAILY_LIMIT")
+
     @field_validator("admin_ids", mode="before")
     @classmethod
     def parse_admin_ids(cls, value):

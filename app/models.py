@@ -54,6 +54,9 @@ class Player(Base):
     referrer_player_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     referrals_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     season_score: Mapped[int] = mapped_column(Integer, default=0, nullable=False, index=True)
+    is_banned: Mapped[int] = mapped_column(Integer, default=0, nullable=False, index=True)
+    ban_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    banned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
@@ -181,6 +184,15 @@ class StarPurchase(Base):
     status: Mapped[str] = mapped_column(String(30), default="paid", nullable=False)
     reward_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+
+class SchemaVersion(Base):
+    __tablename__ = "schema_versions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    version: Mapped[str] = mapped_column(String(40), unique=True, nullable=False, index=True)
+    applied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
 class ActionLog(Base):

@@ -35,6 +35,13 @@ from app.game import (
     referral_payload,
     season_payload,
     season_top,
+    admin_health_payload,
+    backup_payload,
+    ban_player,
+    banned_players_payload,
+    clear_errors,
+    last_actions_payload,
+    unban_player,
     admin_dashboard_payload,
     admin_users_payload,
     admin_user_payload,
@@ -178,6 +185,47 @@ class CallbackThrottleMiddleware(BaseMiddleware):
             except Exception:
                 logger.debug("callback throttle failed", exc_info=True)
         return await handler(event, data)
+
+
+
+class SafetyMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        settings = get_settings()
+        message = None
+        user = None
+        if isinstance(event, Message):
+            message = event
+            user = event.from_user
+        elif isinstance(event, CallbackQuery):
+            user = event.from_user
+            if isinstance(event.message, Message):
+                message = event.message
+
+        if user and not user.is_bot:
+            if settings.maintenance_mode and not is_admin_user(user.id):
+                if isinstance(event, CallbackQuery):
+                    await event.answer("Бот на обновлении. Скоро вернёмся.", show_alert=True)
+                    return None
+                if message:
+                    await clean_answer(message, "🛠 Бот на обновлении. Скоро вернёмся.")
+                    return None
+
+            try:
+                with session_scope() as db:
+                    player, _ = get_or_create_player(db, user.id, user.username, user.first_name)
+                    if int(getattr(player, "is_banned", 0) or 0) == 1 and not is_admin_user(user.id):
+                        reason = player.ban_reason or "без причины"
+                        if isinstance(event, CallbackQuery):
+                            await event.answer(f"Аккаунт заблокирован: {reason}", show_alert=True)
+                            return None
+                        if message:
+                            await clean_answer(message, f"⛔ Аккаунт заблокирован.\nПричина: {h(reason)}")
+                            return None
+            except Exception:
+                logger.debug("safety middleware failed", exc_info=True)
+
+        return await handler(event, data)
+
 
 
 def _short_trace(exc: BaseException) -> str:
@@ -717,13 +765,51 @@ def admin_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🔗 Рефы", callback_data="admin:refs")],
         [InlineKeyboardButton(text="💰 Экономика", callback_data="admin:economy")],
         [InlineKeyboardButton(text="👥 Игроки", callback_data="admin:users")],
+        [InlineKeyboardButton(text="🩺 Health", callback_data="admin:health")],
+        [InlineKeyboardButton(text="⛔ Баны", callback_data="admin:banned")],
     ])
+
+
+
+def render_banned_players(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return "⛔ <b>Баны</b>\n\nСписок пуст."
+    lines = ["⛔ <b>Забаненные игроки</b>", ""]
+    for item in items:
+        username = f"@{item['username']}" if item.get("username") else item["name"]
+        lines.append(f"• <code>{item['telegram_user_id']}</code> · <b>{h(username)}</b> · {h(item['reason'])}")
+    return "\n".join(lines)
+
+
+def render_admin_health(payload: dict[str, Any]) -> str:
+    return (
+        "🩺 <b>Health</b>\n\n"
+        f"Database: <b>{h(payload['database'])}</b>\n"
+        f"Maintenance: <b>{payload['maintenance']}</b>\n"
+        f"Stars enabled: <b>{payload['stars_enabled']}</b>\n"
+        f"Players: <b>{payload['players']}</b>\n"
+        f"Banned: <b>{payload['banned']}</b>\n"
+        f"Errors: <b>{payload['errors']}</b>\n"
+        f"Active events: <b>{payload['active_events']}</b>"
+    )
+
+
+def render_last_actions(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return "🧾 <b>Последние действия</b>\n\nПусто."
+    lines = ["🧾 <b>Последние действия</b>", ""]
+    for item in items:
+        lines.append(f"#{item['id']} · player {item.get('player_id')} · <b>{h(item['action'])}</b>")
+        if item.get("text"):
+            lines.append(f"└ {h(str(item['text'])[:90])}")
+    return "\n".join(lines)
 
 
 def render_admin_dashboard(payload: dict[str, Any]) -> str:
     return (
         "🛠 <b>Админка Капсуликов</b>\n\n"
         f"Игроков: <b>{payload['players']}</b> · новых за 24ч: <b>{payload['players_day']}</b>\n"
+        f"Забанено: <b>{payload.get('banned', 0)}</b>\n"
         f"Групп: <b>{payload['groups']}</b>\n"
         f"Питомцев: <b>{payload['pets']}</b>\n\n"
         f"Капсул за 24ч: <b>{payload['opens_day']}</b>\n"
@@ -777,6 +863,7 @@ def render_admin_user(payload: dict[str, Any] | None) -> str:
         f"Пригласил: <b>{h(payload['referrer'] or '—')}</b>",
         "",
         f"Оплат: <b>{payload['payments']}</b> · <b>{payload['stars']}⭐</b>",
+        f"Бан: <b>{'да' if payload.get('is_banned') else 'нет'}</b> {h(payload.get('ban_reason', ''))}",
     ]
     if payload["actions"]:
         lines.append("\nПоследние действия:")
@@ -1087,6 +1174,86 @@ async def cmd_admin_economy(message: Message) -> None:
     with session_scope() as db:
         payload = admin_economy_payload(db)
     await clean_answer(message, render_admin_economy(payload), reply_markup=admin_keyboard())
+
+
+@router.message(Command("admin_ban"))
+async def cmd_admin_ban(message: Message, command: CommandObject) -> None:
+    if not is_admin_user(message.from_user.id if message.from_user else None):
+        return
+    parts = (command.args or "").split(maxsplit=1)
+    if not parts:
+        await clean_answer(message, "Формат: <code>/admin_ban USER_ID причина</code>")
+        return
+    reason = parts[1] if len(parts) > 1 else "без причины"
+    with session_scope() as db:
+        ok, text = ban_player(db, int(parts[0]), reason)
+    await clean_answer(message, ("✅ " if ok else "⛔ ") + h(text), reply_markup=admin_keyboard())
+
+
+@router.message(Command("admin_unban"))
+async def cmd_admin_unban(message: Message, command: CommandObject) -> None:
+    if not is_admin_user(message.from_user.id if message.from_user else None):
+        return
+    raw = (command.args or "").strip()
+    if not raw:
+        await clean_answer(message, "Формат: <code>/admin_unban USER_ID</code>")
+        return
+    with session_scope() as db:
+        ok, text = unban_player(db, int(raw))
+    await clean_answer(message, ("✅ " if ok else "⛔ ") + h(text), reply_markup=admin_keyboard())
+
+
+@router.message(Command("admin_banned"))
+async def cmd_admin_banned(message: Message) -> None:
+    if not is_admin_user(message.from_user.id if message.from_user else None):
+        return
+    with session_scope() as db:
+        items = banned_players_payload(db)
+    await clean_answer(message, render_banned_players(items), reply_markup=admin_keyboard())
+
+
+@router.message(Command("admin_health"))
+async def cmd_admin_health(message: Message) -> None:
+    if not is_admin_user(message.from_user.id if message.from_user else None):
+        return
+    with session_scope() as db:
+        payload = admin_health_payload(db)
+    await clean_answer(message, render_admin_health(payload), reply_markup=admin_keyboard())
+
+
+@router.message(Command("admin_last_actions"))
+async def cmd_admin_last_actions(message: Message) -> None:
+    if not is_admin_user(message.from_user.id if message.from_user else None):
+        return
+    with session_scope() as db:
+        items = last_actions_payload(db)
+    await clean_answer(message, render_last_actions(items), reply_markup=admin_keyboard())
+
+
+@router.message(Command("admin_clear_errors"))
+async def cmd_admin_clear_errors(message: Message) -> None:
+    if not is_admin_user(message.from_user.id if message.from_user else None):
+        return
+    with session_scope() as db:
+        count = clear_errors(db)
+    await clean_answer(message, f"🧹 Очищено ошибок: <b>{count}</b>", reply_markup=admin_keyboard())
+
+
+@router.message(Command("admin_backup"))
+async def cmd_admin_backup(message: Message) -> None:
+    if not is_admin_user(message.from_user.id if message.from_user else None):
+        return
+    with session_scope() as db:
+        payload = backup_payload(db)
+    from pathlib import Path
+    import json as _json
+    import tempfile
+    path = Path(tempfile.gettempdir()) / f"capsuliki_backup_{int(__import__('time').time())}.json"
+    path.write_text(_json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    await _delete_previous_bot_message(message.bot, message.chat.id)
+    sent = await message.answer_document(FSInputFile(path), caption="🧩 Бэкап Капсуликов")
+    LAST_BOT_MESSAGES[message.chat.id] = sent.message_id
+
 
 
 
@@ -1848,6 +2015,10 @@ async def cb_admin_dashboard(callback: CallbackQuery) -> None:
             await clean_answer(callback.message, render_admin_economy(admin_economy_payload(db)), reply_markup=admin_keyboard())
         elif key == "users":
             await clean_answer(callback.message, render_admin_users(admin_users_payload(db)), reply_markup=admin_keyboard())
+        elif key == "health":
+            await clean_answer(callback.message, render_admin_health(admin_health_payload(db)), reply_markup=admin_keyboard())
+        elif key == "banned":
+            await clean_answer(callback.message, render_banned_players(banned_players_payload(db)), reply_markup=admin_keyboard())
         else:
             await clean_answer(callback.message, "Неизвестный раздел админки.", reply_markup=admin_keyboard())
 
@@ -1892,6 +2063,8 @@ async def run_bot_polling() -> None:
         return
     bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
+    dp.message.middleware(SafetyMiddleware())
+    dp.callback_query.middleware(SafetyMiddleware())
     dp.callback_query.middleware(CallbackThrottleMiddleware())
     dp.include_router(router)
     task: asyncio.Task | None = None

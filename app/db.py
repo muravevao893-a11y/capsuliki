@@ -71,11 +71,15 @@ def run_light_migrations() -> None:
         return
     _add_column_if_missing("players", "capsule_dust", "capsule_dust INTEGER NOT NULL DEFAULT 0")
     _add_column_if_missing("players", "season_score", "season_score INTEGER NOT NULL DEFAULT 0")
+    _add_column_if_missing("players", "banned_at", "banned_at TIMESTAMP")
+    _add_column_if_missing("players", "ban_reason", "ban_reason TEXT")
+    _add_column_if_missing("players", "is_banned", "is_banned INTEGER NOT NULL DEFAULT 0")
     _add_column_if_missing("players", "referrals_count", "referrals_count INTEGER NOT NULL DEFAULT 0")
     _add_column_if_missing("players", "referrer_player_id", "referrer_player_id INTEGER")
     _create_index_if_missing("ix_players_tg", "CREATE INDEX IF NOT EXISTS ix_players_tg ON players (telegram_user_id)")
     _create_index_if_missing("ix_players_referrer", "CREATE INDEX IF NOT EXISTS ix_players_referrer ON players (referrer_player_id)")
     _create_index_if_missing("ix_players_season_score", "CREATE INDEX IF NOT EXISTS ix_players_season_score ON players (season_score)")
+    _create_index_if_missing("ix_players_banned", "CREATE INDEX IF NOT EXISTS ix_players_banned ON players (is_banned)")
     _create_index_if_missing("ix_pets_owner", "CREATE INDEX IF NOT EXISTS ix_pets_owner ON pets (owner_player_id)")
     _create_index_if_missing("ix_events_chat", "CREATE INDEX IF NOT EXISTS ix_group_events_chat ON group_events (chat_id, status)")
     _create_index_if_missing("ix_logs_created", "CREATE INDEX IF NOT EXISTS ix_action_logs_created ON action_logs (created_at)")
@@ -86,10 +90,26 @@ def run_light_migrations() -> None:
     _create_index_if_missing("ix_star_purchases_player_created", "CREATE INDEX IF NOT EXISTS ix_star_purchases_player_created ON star_purchases (player_id, created_at)")
 
 
+def record_schema_version(version: str = "1.0") -> None:
+    from app.models import SchemaVersion
+
+    session = SessionLocal()
+    try:
+        exists = session.query(SchemaVersion).filter(SchemaVersion.version == version).first()
+        if not exists:
+            session.add(SchemaVersion(version=version))
+            session.commit()
+    except Exception:
+        session.rollback()
+    finally:
+        session.close()
+
+
 def init_db() -> None:
     from app import models  # noqa: F401
     Base.metadata.create_all(engine)
     run_light_migrations()
+    record_schema_version("1.0")
 
 
 @contextmanager

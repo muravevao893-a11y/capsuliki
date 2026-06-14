@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.models import ActionLog, ErrorLog, EventStatus, Expedition, GroupChat, GroupEvent, Pet, Player, Rarity, StarPurchase, Trade, TradeStatus, utcnow
 
 
@@ -162,6 +163,143 @@ def add_season_score(player: Player, amount: int) -> None:
     if amount <= 0:
         return
     player.season_score = int(getattr(player, "season_score", 0) or 0) + int(amount)
+
+
+
+def is_banned_player(player: Player | None) -> bool:
+    return bool(player and int(getattr(player, "is_banned", 0) or 0) == 1)
+
+
+def banned_message(player: Player) -> str:
+    reason = (getattr(player, "ban_reason", None) or "без причины").strip()
+    return f"Аккаунт заблокирован. Причина: {reason}"
+
+
+def require_not_banned(player: Player) -> tuple[bool, str]:
+    if is_banned_player(player):
+        return False, banned_message(player)
+    return True, ""
+
+
+def _action_count_today(db: Session, player: Player, action: str | None = None, prefix: str | None = None) -> int:
+    q = select(func.count(ActionLog.id)).where(ActionLog.player_id == player.id, ActionLog.created_at >= day_start_utc())
+    if action:
+        q = q.where(ActionLog.action == action)
+    if prefix:
+        q = q.where(ActionLog.action.like(f"{prefix}%"))
+    return int(db.scalar(q) or 0)
+
+
+def check_daily_limit(db: Session, player: Player, action: str | None, limit: int, prefix: str | None = None) -> tuple[bool, str]:
+    if limit <= 0:
+        return True, ""
+    used = _action_count_today(db, player, action=action, prefix=prefix)
+    if used >= limit:
+        return False, f"Дневной лимит исчерпан: {used}/{limit}."
+    return True, ""
+
+
+def ban_player(db: Session, telegram_user_id: int, reason: str = "") -> tuple[bool, str]:
+    player = db.scalar(select(Player).where(Player.telegram_user_id == telegram_user_id))
+    if not player:
+        return False, "Игрок не найден."
+    player.is_banned = 1
+    player.ban_reason = reason or "без причины"
+    player.banned_at = utcnow()
+    log(db, player.id, None, "admin_ban", player.ban_reason)
+    db.flush()
+    return True, f"Игрок {hname(player)} заблокирован."
+
+
+def unban_player(db: Session, telegram_user_id: int) -> tuple[bool, str]:
+    player = db.scalar(select(Player).where(Player.telegram_user_id == telegram_user_id))
+    if not player:
+        return False, "Игрок не найден."
+    player.is_banned = 0
+    player.ban_reason = None
+    player.banned_at = None
+    log(db, player.id, None, "admin_unban", "")
+    db.flush()
+    return True, f"Игрок {hname(player)} разблокирован."
+
+
+def banned_players_payload(db: Session, limit: int = 20) -> list[dict[str, Any]]:
+    rows = db.scalars(select(Player).where(Player.is_banned == 1).order_by(desc(Player.banned_at)).limit(limit)).all()
+    return [
+        {
+            "telegram_user_id": p.telegram_user_id,
+            "username": p.username,
+            "name": hname(p),
+            "reason": p.ban_reason or "",
+            "banned_at": p.banned_at.isoformat() if p.banned_at else "",
+        }
+        for p in rows
+    ]
+
+
+def clear_errors(db: Session) -> int:
+    count = int(db.scalar(select(func.count(ErrorLog.id))) or 0)
+    db.query(ErrorLog).delete()
+    db.flush()
+    return count
+
+
+def last_actions_payload(db: Session, limit: int = 20) -> list[dict[str, Any]]:
+    rows = db.scalars(select(ActionLog).order_by(desc(ActionLog.created_at)).limit(limit)).all()
+    return [
+        {
+            "id": item.id,
+            "player_id": item.player_id,
+            "chat_id": item.chat_id,
+            "action": item.action,
+            "text": item.text,
+            "created_at": item.created_at.isoformat(),
+        }
+        for item in rows
+    ]
+
+
+def admin_health_payload(db: Session) -> dict[str, Any]:
+    settings = get_settings()
+    return {
+        "database": "ok",
+        "maintenance": bool(settings.maintenance_mode),
+        "players": int(db.scalar(select(func.count(Player.id))) or 0),
+        "banned": int(db.scalar(select(func.count(Player.id)).where(Player.is_banned == 1)) or 0),
+        "errors": int(db.scalar(select(func.count(ErrorLog.id))) or 0),
+        "active_events": int(db.scalar(select(func.count(GroupEvent.id)).where(GroupEvent.status == EventStatus.ACTIVE.value)) or 0),
+        "stars_enabled": bool(settings.stars_enabled),
+    }
+
+
+def backup_payload(db: Session) -> dict[str, Any]:
+    def rows_for(model, limit: int | None = None):
+        q = select(model)
+        if limit:
+            q = q.limit(limit)
+        rows = db.scalars(q).all()
+        result = []
+        for row in rows:
+            item = {}
+            for col in row.__table__.columns:
+                value = getattr(row, col.name)
+                if isinstance(value, datetime):
+                    value = value.isoformat()
+                item[col.name] = value
+            result.append(item)
+        return result
+
+    return {
+        "created_at": utcnow().isoformat(),
+        "schema": "1.0",
+        "players": rows_for(Player),
+        "pets": rows_for(Pet),
+        "groups": rows_for(GroupChat),
+        "events": rows_for(GroupEvent),
+        "trades": rows_for(Trade),
+        "purchases": rows_for(StarPurchase),
+        "actions_tail": rows_for(ActionLog, limit=500),
+    }
 
 
 def log_error(
@@ -482,6 +620,15 @@ def create_pet_from_species(db: Session, owner: Player, species: dict[str, Any])
 
 
 def open_capsule(db: Session, player: Player, force: bool = False, capsule_type: str = "daily") -> tuple[bool, str, Pet | None]:
+    ok_ban, ban_text = require_not_banned(player)
+    if not ok_ban and not force:
+        return False, ban_text, None
+    settings = get_settings()
+    if not force:
+        limit = settings.free_open_daily_limit if capsule_type == "daily" else settings.paid_open_daily_limit
+        ok_limit, limit_text = check_daily_limit(db, player, "open_capsule", limit)
+        if not ok_limit:
+            return False, limit_text, None
     if capsule_type not in CAPSULE_TYPES:
         return False, "Такой капсулы нет.", None
 
@@ -661,6 +808,12 @@ def set_favorite(db: Session, player: Player, pet_id: int) -> tuple[bool, str]:
 
 
 def care_pet(db: Session, player: Player, action: str, pet_id: int | None = None) -> tuple[bool, str, dict[str, Any] | None]:
+    ok_ban, ban_text = require_not_banned(player)
+    if not ok_ban:
+        return False, ban_text, None
+    ok_limit, limit_text = check_daily_limit(db, player, None, get_settings().care_daily_limit, prefix="care_")
+    if not ok_limit:
+        return False, limit_text, None
     spec = CARE_ACTIONS.get(action)
     if not spec:
         return False, "Такого ухода нет.", None
@@ -833,6 +986,12 @@ def spawn_catch_event(db: Session, chat_id: int, chat_title: str) -> GroupEvent:
 
 
 def catch_group_pet(db: Session, chat_id: int, player: Player, event_id: int) -> tuple[bool, str, Pet | None]:
+    ok_ban, ban_text = require_not_banned(player)
+    if not ok_ban:
+        return False, ban_text, None
+    ok_limit, limit_text = check_daily_limit(db, player, "group_catch", get_settings().group_catch_daily_limit)
+    if not ok_limit:
+        return False, limit_text, None
     event = db.get(GroupEvent, event_id)
     if not event or event.chat_id != chat_id or event.status != EventStatus.ACTIVE.value or event.event_type != "catch":
         return False, "Капсулик уже убежал.", None
@@ -1027,6 +1186,8 @@ def claim_daily_reward(db: Session, player: Player) -> tuple[bool, str, dict[str
 
 
 def apply_referral(db: Session, new_player: Player, referrer_id: int | None) -> tuple[bool, str]:
+    if is_banned_player(new_player):
+        return False, banned_message(new_player)
     if not referrer_id:
         return False, ""
     if new_player.referrer_player_id:
@@ -1208,6 +1369,8 @@ def apply_star_purchase(
 
     if player.id != player_id:
         return False, "Оплата не принадлежит этому игроку.", None
+    if is_banned_player(player):
+        return False, banned_message(player), None
 
     if int(product["stars"]) != int(stars_amount):
         return False, "Сумма оплаты не совпадает с товаром.", None
@@ -1326,6 +1489,7 @@ def admin_dashboard_payload(db: Session) -> dict[str, Any]:
     return {
         "players": int(db.scalar(select(func.count(Player.id))) or 0),
         "players_day": int(db.scalar(select(func.count(Player.id)).where(Player.created_at >= day)) or 0),
+        "banned": int(db.scalar(select(func.count(Player.id)).where(Player.is_banned == 1)) or 0),
         "groups": int(db.scalar(select(func.count(GroupChat.id))) or 0),
         "pets": int(db.scalar(select(func.count(Pet.id))) or 0),
         "opens_day": _count_actions(db, action="open_capsule", since=day),
@@ -1412,6 +1576,8 @@ def admin_user_payload(db: Session, query: str) -> dict[str, Any] | None:
         "referrer": hname(referrer) if referrer else "",
         "payments": pay_count,
         "stars": pay_stars,
+        "is_banned": int(getattr(player, "is_banned", 0) or 0),
+        "ban_reason": player.ban_reason or "",
         "created_at": player.created_at.isoformat(),
         "updated_at": player.updated_at.isoformat(),
         "actions": [
