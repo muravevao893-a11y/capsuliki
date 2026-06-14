@@ -163,6 +163,26 @@ class ErrorLog(Base):
 
 
 
+
+class StarPurchase(Base):
+    __tablename__ = "star_purchases"
+    __table_args__ = (
+        Index("ix_star_purchases_player_created", "player_id", "created_at"),
+        Index("ix_star_purchases_payload", "payload"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    player_id: Mapped[int] = mapped_column(ForeignKey("players.id"), nullable=False, index=True)
+    telegram_payment_charge_id: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True)
+    provider_payment_charge_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    payload: Mapped[str] = mapped_column(String(120), nullable=False)
+    product_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    stars_amount: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="paid", nullable=False)
+    reward_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
 class ActionLog(Base):
     __tablename__ = "action_logs"
 

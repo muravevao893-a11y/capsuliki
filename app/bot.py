@@ -10,7 +10,7 @@ from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatType, ParseMode
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import BotCommand, CallbackQuery, ErrorEvent, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import BotCommand, CallbackQuery, ErrorEvent, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, LabeledPrice, Message, PreCheckoutQuery
 from sqlalchemy import select
 
 from app.config import get_settings
@@ -35,6 +35,20 @@ from app.game import (
     referral_payload,
     season_payload,
     season_top,
+    admin_dashboard_payload,
+    admin_users_payload,
+    admin_user_payload,
+    admin_revenue_payload,
+    admin_products_payload,
+    admin_top_donors_payload,
+    admin_referrals_payload,
+    admin_economy_payload,
+    admin_payments_payload,
+    apply_star_purchase,
+    build_star_payload,
+    get_star_product,
+    purchase_history_payload,
+    stars_shop_payload,
     admin_stats,
     claim_daily_reward,
     claim_quests,
@@ -132,6 +146,9 @@ async def setup_bot_commands(bot: Bot) -> None:
         BotCommand(command="quests", description="задания дня"),
         BotCommand(command="daily", description="ежедневная награда"),
         BotCommand(command="ref", description="пригласить друзей"),
+        BotCommand(command="payments", description="мои оплаты"),
+        BotCommand(command="stars", description="донат-магазин"),
+        BotCommand(command="donate", description="поддержать проект"),
         BotCommand(command="season_top", description="топ сезона"),
         BotCommand(command="season", description="сезон"),
         BotCommand(command="my", description="коллекция"),
@@ -206,6 +223,7 @@ def more_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🎁 Награда", callback_data="cap:daily")],
         [InlineKeyboardButton(text="🌙 Сезон", callback_data="cap:season")],
         [InlineKeyboardButton(text="🔗 Пригласить", callback_data="cap:ref")],
+        [InlineKeyboardButton(text="⭐ Донат", callback_data="cap:donate")],
         [InlineKeyboardButton(text="🛒 Магазин", callback_data="cap:shop")],
         [InlineKeyboardButton(text="🎒 Экспедиции", callback_data="cap:expeditions")],
         [InlineKeyboardButton(text="🏆 Топ", callback_data="cap:top")],
@@ -643,6 +661,199 @@ def ref_keyboard() -> InlineKeyboardMarkup:
 
 
 
+
+def render_stars_shop(payload: dict[str, Any]) -> str:
+    lines = [
+        "⭐ <b>Донат-магазин</b>",
+        "",
+        "Поддержка проекта через Telegram Stars.",
+        "",
+        f"Баланс: 💎 <b>{payload['balance']['crystals']}</b> · пыль <b>{payload['balance']['dust']}</b>",
+        "",
+    ]
+    for item in payload["products"]:
+        reward = item["reward"]
+        parts = []
+        if reward.get("coins"):
+            parts.append(f"{reward['coins']} монет")
+        if reward.get("crystals"):
+            parts.append(f"{reward['crystals']} кристаллов")
+        if reward.get("dust"):
+            parts.append(f"{reward['dust']} пыли")
+        if reward.get("season_score"):
+            parts.append(f"{reward['season_score']} очков сезона")
+        lines.append(f"• <b>{h(item['title'])}</b> — <b>{item['stars']}⭐</b>")
+        lines.append(f"  {h(', '.join(parts))}")
+    return "\n".join(lines)
+
+
+def stars_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⭐ 15", callback_data="cap:buy:support_15")],
+        [InlineKeyboardButton(text="⭐ 35", callback_data="cap:buy:rare_pack_35")],
+        [InlineKeyboardButton(text="⭐ 75", callback_data="cap:buy:epic_pack_75")],
+        [InlineKeyboardButton(text="⭐ 149", callback_data="cap:buy:legend_pack_149")],
+        [InlineKeyboardButton(text="📜 История", callback_data="cap:payments")],
+        [InlineKeyboardButton(text="🏠 Меню", callback_data="cap:menu")],
+    ])
+
+
+def render_payment_history(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return "📜 <b>История оплат</b>\n\nПокупок пока нет."
+    lines = ["📜 <b>История оплат</b>", ""]
+    for item in items:
+        lines.append(f"#{item['id']} · {h(item['title'])} · <b>{item['stars']}⭐</b> · {h(item['status'])}")
+    return "\n".join(lines)
+
+
+
+def admin_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Обзор", callback_data="admin:dashboard")],
+        [InlineKeyboardButton(text="⭐ Доход", callback_data="admin:revenue")],
+        [InlineKeyboardButton(text="🧾 Товары", callback_data="admin:products")],
+        [InlineKeyboardButton(text="👑 Донатеры", callback_data="admin:donors")],
+        [InlineKeyboardButton(text="🔗 Рефы", callback_data="admin:refs")],
+        [InlineKeyboardButton(text="💰 Экономика", callback_data="admin:economy")],
+        [InlineKeyboardButton(text="👥 Игроки", callback_data="admin:users")],
+    ])
+
+
+def render_admin_dashboard(payload: dict[str, Any]) -> str:
+    return (
+        "🛠 <b>Админка Капсуликов</b>\n\n"
+        f"Игроков: <b>{payload['players']}</b> · новых за 24ч: <b>{payload['players_day']}</b>\n"
+        f"Групп: <b>{payload['groups']}</b>\n"
+        f"Питомцев: <b>{payload['pets']}</b>\n\n"
+        f"Капсул за 24ч: <b>{payload['opens_day']}</b>\n"
+        f"Капсул за 7д: <b>{payload['opens_week']}</b>\n"
+        f"Уход за 24ч: <b>{payload['care_day']}</b>\n"
+        f"Квесты за 24ч: <b>{payload['quests_day']}</b>\n\n"
+        f"Оплат всего: <b>{payload['payments_total']}</b> · <b>{payload['stars_total']}⭐</b>\n"
+        f"24ч: <b>{payload['payments_day']}</b> оплат · <b>{payload['stars_day']}⭐</b>\n"
+        f"7д: <b>{payload['payments_week']}</b> оплат · <b>{payload['stars_week']}⭐</b>\n"
+        f"30д: <b>{payload['payments_month']}</b> оплат · <b>{payload['stars_month']}⭐</b>\n\n"
+        f"Рефералов всего: <b>{payload['referrals_total']}</b>\n"
+        f"Ошибок за 24ч: <b>{payload['errors_day']}</b>"
+    )
+
+
+def render_admin_users(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return "👥 <b>Игроки</b>\n\nПока пусто."
+    lines = ["👥 <b>Последние игроки</b>", ""]
+    for item in items:
+        username = f"@{item['username']}" if item.get("username") else item["name"]
+        lines.append(
+            f"<code>{item['telegram_user_id']}</code> · <b>{h(username)}</b> · ур.{item['level']} · "
+            f"капсул {item['opened']} · {item['season_score']} очк."
+        )
+    lines.append("\nДетально: <code>/admin_user USER_ID</code>")
+    return "\n".join(lines)
+
+
+def render_admin_user(payload: dict[str, Any] | None) -> str:
+    if not payload:
+        return "👤 Игрок не найден."
+    username = f"@{payload['username']}" if payload.get("username") else "—"
+    lines = [
+        "👤 <b>Игрок</b>",
+        "",
+        f"Имя: <b>{h(payload['name'])}</b>",
+        f"Username: <b>{h(username)}</b>",
+        f"TG ID: <code>{payload['telegram_user_id']}</code>",
+        f"Internal ID: <code>{payload['id']}</code>",
+        "",
+        f"Уровень: <b>{payload['level']}</b> · XP <b>{payload['xp']}</b>",
+        f"Монеты: <b>{payload['coins']}</b>",
+        f"Кристаллы: <b>{payload['crystals']}</b>",
+        f"Пыль: <b>{payload['dust']}</b>",
+        "",
+        f"Капсул открыто: <b>{payload['opened']}</b>",
+        f"Питомцев: <b>{payload['pets']}</b> · уникальных <b>{payload['unique_pets']}</b>",
+        f"Очки сезона: <b>{payload['season_score']}</b>",
+        f"Рефералы: <b>{payload['referrals']}</b>",
+        f"Пригласил: <b>{h(payload['referrer'] or '—')}</b>",
+        "",
+        f"Оплат: <b>{payload['payments']}</b> · <b>{payload['stars']}⭐</b>",
+    ]
+    if payload["actions"]:
+        lines.append("\nПоследние действия:")
+        for item in payload["actions"]:
+            lines.append(f"• {h(item['action'])} · {h(str(item.get('text') or '')[:70])}")
+    return "\n".join(lines)
+
+
+def render_admin_revenue(payload: dict[str, Any]) -> str:
+    lines = [
+        "⭐ <b>Доход Stars</b>",
+        "",
+        f"Всего: <b>{payload['total']['count']}</b> оплат · <b>{payload['total']['stars']}⭐</b>",
+        "",
+    ]
+    for label, item in payload["ranges"].items():
+        lines.append(f"{label}: <b>{item['count']}</b> оплат · <b>{item['stars']}⭐</b>")
+    return "\n".join(lines)
+
+
+def render_admin_products(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return "🧾 <b>Товары</b>\n\nПокупок пока нет."
+    lines = ["🧾 <b>Популярность товаров</b>", ""]
+    for item in items:
+        lines.append(f"• <b>{h(item['title'])}</b> — {item['count']} покупок · <b>{item['stars']}⭐</b>")
+    return "\n".join(lines)
+
+
+def render_admin_donors(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return "👑 <b>Топ донатеров</b>\n\nПока пусто."
+    lines = ["👑 <b>Топ донатеров</b>", ""]
+    for i, item in enumerate(items, 1):
+        username = f"@{item['username']}" if item.get("username") else item["name"]
+        lines.append(f"{i}. <b>{h(username)}</b> · {item['payments']} оплат · <b>{item['stars']}⭐</b>")
+    return "\n".join(lines)
+
+
+def render_admin_refs(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return "🔗 <b>Рефералы</b>\n\nПока никто никого не привёл."
+    lines = ["🔗 <b>Топ по рефералам</b>", ""]
+    for i, item in enumerate(items, 1):
+        username = f"@{item['username']}" if item.get("username") else item["name"]
+        lines.append(f"{i}. <b>{h(username)}</b> · {item['referrals']} реф · {item['season_score']} очк.")
+    return "\n".join(lines)
+
+
+def render_admin_economy(payload: dict[str, Any]) -> str:
+    return (
+        "💰 <b>Экономика</b>\n\n"
+        f"Игроков: <b>{payload['players']}</b>\n"
+        f"Капсул открыто всего: <b>{payload['opened']}</b>\n"
+        f"Питомцев всего: <b>{payload['pets']}</b>\n\n"
+        f"Монет в экономике: <b>{payload['coins']}</b>\n"
+        f"Кристаллов в экономике: <b>{payload['crystals']}</b>\n"
+        f"Пыли в экономике: <b>{payload['dust']}</b>\n\n"
+        f"Среднее на игрока:\n"
+        f"монеты <b>{payload['avg_coins']}</b> · кристаллы <b>{payload['avg_crystals']}</b> · пыль <b>{payload['avg_dust']}</b>"
+    )
+
+
+
+def render_admin_payments(payload: dict[str, Any]) -> str:
+    lines = [
+        "⭐ <b>Платежи</b>",
+        "",
+        f"Всего оплат: <b>{payload['total']}</b>",
+        f"Всего Stars: <b>{payload['stars']}⭐</b>",
+        "",
+    ]
+    for item in payload["recent"]:
+        lines.append(f"#{item['id']} · player {item['player_id']} · {h(item['product'])} · {item['stars']}⭐")
+    return "\n".join(lines)
+
+
 def render_stats(payload: dict[str, Any]) -> str:
     return (
         "🛠 <b>Статистика</b>\n\n"
@@ -652,7 +863,8 @@ def render_stats(payload: dict[str, Any]) -> str:
         f"Открытий за 24ч: <b>{payload['opens_day']}</b>\n"
         f"Активных групповых событий: <b>{payload['group_events_active']}</b>\n"
         f"Обменов в ожидании: <b>{payload['trades_pending']}</b>\n"
-        f"Ошибок за 24ч: <b>{payload.get('errors', 0)}</b>"
+        f"Ошибок за 24ч: <b>{payload.get('errors', 0)}</b>\n"
+        f"Оплат: <b>{payload.get('payments', 0)}</b> · Stars собрано: <b>{payload.get('stars', 0)}</b>"
     )
 
 
@@ -770,6 +982,113 @@ async def cmd_season_top(message: Message) -> None:
     with session_scope() as db:
         items = season_top(db)
     await clean_answer(message, render_season_top(items), reply_markup=season_keyboard())
+
+
+@router.message(Command("donate", "stars"))
+async def cmd_donate(message: Message) -> None:
+    if not message.from_user:
+        return
+    with session_scope() as db:
+        player, _ = get_or_create_player(db, message.from_user.id, message.from_user.username, message.from_user.first_name)
+        payload = stars_shop_payload(player)
+    await clean_answer(message, render_stars_shop(payload), reply_markup=stars_keyboard())
+
+
+@router.message(Command("payments"))
+async def cmd_payments(message: Message) -> None:
+    if not message.from_user:
+        return
+    with session_scope() as db:
+        player, _ = get_or_create_player(db, message.from_user.id, message.from_user.username, message.from_user.first_name)
+        items = purchase_history_payload(db, player)
+    await clean_answer(message, render_payment_history(items), reply_markup=stars_keyboard())
+
+
+@router.message(Command("admin_payments"))
+async def cmd_admin_payments(message: Message) -> None:
+    if not is_admin_user(message.from_user.id if message.from_user else None):
+        return
+    with session_scope() as db:
+        payload = admin_payments_payload(db)
+    await clean_answer(message, render_admin_payments(payload))
+
+
+@router.message(Command("admin"))
+async def cmd_admin_dashboard(message: Message) -> None:
+    if not is_admin_user(message.from_user.id if message.from_user else None):
+        return
+    with session_scope() as db:
+        payload = admin_dashboard_payload(db)
+    await clean_answer(message, render_admin_dashboard(payload), reply_markup=admin_keyboard())
+
+
+@router.message(Command("admin_users"))
+async def cmd_admin_users(message: Message) -> None:
+    if not is_admin_user(message.from_user.id if message.from_user else None):
+        return
+    with session_scope() as db:
+        items = admin_users_payload(db)
+    await clean_answer(message, render_admin_users(items), reply_markup=admin_keyboard())
+
+
+@router.message(Command("admin_user"))
+async def cmd_admin_user(message: Message, command: CommandObject) -> None:
+    if not is_admin_user(message.from_user.id if message.from_user else None):
+        return
+    query = (command.args or "").strip()
+    if not query:
+        await clean_answer(message, "Формат: <code>/admin_user USER_ID</code>")
+        return
+    with session_scope() as db:
+        payload = admin_user_payload(db, query)
+    await clean_answer(message, render_admin_user(payload), reply_markup=admin_keyboard())
+
+
+@router.message(Command("admin_revenue"))
+async def cmd_admin_revenue(message: Message) -> None:
+    if not is_admin_user(message.from_user.id if message.from_user else None):
+        return
+    with session_scope() as db:
+        payload = admin_revenue_payload(db)
+    await clean_answer(message, render_admin_revenue(payload), reply_markup=admin_keyboard())
+
+
+@router.message(Command("admin_products"))
+async def cmd_admin_products(message: Message) -> None:
+    if not is_admin_user(message.from_user.id if message.from_user else None):
+        return
+    with session_scope() as db:
+        items = admin_products_payload(db)
+    await clean_answer(message, render_admin_products(items), reply_markup=admin_keyboard())
+
+
+@router.message(Command("admin_top_donors"))
+async def cmd_admin_top_donors(message: Message) -> None:
+    if not is_admin_user(message.from_user.id if message.from_user else None):
+        return
+    with session_scope() as db:
+        items = admin_top_donors_payload(db)
+    await clean_answer(message, render_admin_donors(items), reply_markup=admin_keyboard())
+
+
+@router.message(Command("admin_referrals"))
+async def cmd_admin_referrals(message: Message) -> None:
+    if not is_admin_user(message.from_user.id if message.from_user else None):
+        return
+    with session_scope() as db:
+        items = admin_referrals_payload(db)
+    await clean_answer(message, render_admin_refs(items), reply_markup=admin_keyboard())
+
+
+@router.message(Command("admin_economy"))
+async def cmd_admin_economy(message: Message) -> None:
+    if not is_admin_user(message.from_user.id if message.from_user else None):
+        return
+    with session_scope() as db:
+        payload = admin_economy_payload(db)
+    await clean_answer(message, render_admin_economy(payload), reply_markup=admin_keyboard())
+
+
 
 
 
@@ -1171,6 +1490,59 @@ async def cb_season_top(callback: CallbackQuery) -> None:
         await clean_answer(callback.message, render_season_top(items), reply_markup=season_keyboard())
 
 
+@router.callback_query(F.data == "cap:donate")
+async def cb_donate(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if callback.from_user and isinstance(callback.message, Message):
+        with session_scope() as db:
+            player, _ = get_or_create_player(db, callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+            payload = stars_shop_payload(player)
+        await clean_answer(callback.message, render_stars_shop(payload), reply_markup=stars_keyboard())
+
+
+@router.callback_query(F.data.startswith("cap:buy:"))
+async def cb_buy_stars(callback: CallbackQuery) -> None:
+    if not callback.from_user or not isinstance(callback.message, Message) or not callback.data:
+        await callback.answer("Не получилось.", show_alert=True)
+        return
+    settings = get_settings()
+    if not settings.stars_enabled:
+        await callback.answer("Донат пока выключен.", show_alert=True)
+        return
+
+    product_key = callback.data.split(":")[-1]
+    product = get_star_product(product_key)
+    if not product:
+        await callback.answer("Товар не найден.", show_alert=True)
+        return
+
+    with session_scope() as db:
+        player, _ = get_or_create_player(db, callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+        payload = build_star_payload(player, product_key)
+
+    await callback.answer()
+    await callback.message.bot.send_invoice(
+        chat_id=callback.message.chat.id,
+        title=product["title"],
+        description=product["description"],
+        payload=payload,
+        provider_token="",
+        currency=settings.stars_currency,
+        prices=[LabeledPrice(label=product["title"], amount=int(product["stars"]))],
+    )
+
+
+@router.callback_query(F.data == "cap:payments")
+async def cb_payments(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if callback.from_user and isinstance(callback.message, Message):
+        with session_scope() as db:
+            player, _ = get_or_create_player(db, callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+            items = purchase_history_payload(db, player)
+        await clean_answer(callback.message, render_payment_history(items), reply_markup=stars_keyboard())
+
+
+
 
 
 @router.callback_query(F.data == "cap:open")
@@ -1449,6 +1821,68 @@ async def group_event_loop(bot: Bot) -> None:
         except Exception as exc:
             store_runtime_error("group_event_loop", exc)
             logger.exception("group event loop failed")
+
+
+
+@router.callback_query(F.data.startswith("admin:"))
+async def cb_admin_dashboard(callback: CallbackQuery) -> None:
+    if not is_admin_user(callback.from_user.id if callback.from_user else None):
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+    await callback.answer()
+    if not isinstance(callback.message, Message) or not callback.data:
+        return
+    key = callback.data.split(":", 1)[1]
+    with session_scope() as db:
+        if key == "dashboard":
+            await clean_answer(callback.message, render_admin_dashboard(admin_dashboard_payload(db)), reply_markup=admin_keyboard())
+        elif key == "revenue":
+            await clean_answer(callback.message, render_admin_revenue(admin_revenue_payload(db)), reply_markup=admin_keyboard())
+        elif key == "products":
+            await clean_answer(callback.message, render_admin_products(admin_products_payload(db)), reply_markup=admin_keyboard())
+        elif key == "donors":
+            await clean_answer(callback.message, render_admin_donors(admin_top_donors_payload(db)), reply_markup=admin_keyboard())
+        elif key == "refs":
+            await clean_answer(callback.message, render_admin_refs(admin_referrals_payload(db)), reply_markup=admin_keyboard())
+        elif key == "economy":
+            await clean_answer(callback.message, render_admin_economy(admin_economy_payload(db)), reply_markup=admin_keyboard())
+        elif key == "users":
+            await clean_answer(callback.message, render_admin_users(admin_users_payload(db)), reply_markup=admin_keyboard())
+        else:
+            await clean_answer(callback.message, "Неизвестный раздел админки.", reply_markup=admin_keyboard())
+
+
+
+@router.pre_checkout_query()
+async def on_pre_checkout(pre_checkout: PreCheckoutQuery) -> None:
+    product_key, player_id = __import__("app.game", fromlist=["parse_star_payload"]).parse_star_payload(pre_checkout.invoice_payload)
+    product = get_star_product(product_key or "")
+    if not product:
+        await pre_checkout.answer(ok=False, error_message="Товар не найден.")
+        return
+    if int(pre_checkout.total_amount) != int(product["stars"]):
+        await pre_checkout.answer(ok=False, error_message="Сумма не совпадает.")
+        return
+    await pre_checkout.answer(ok=True)
+
+
+@router.message(F.successful_payment)
+async def on_successful_payment(message: Message) -> None:
+    if not message.from_user or not message.successful_payment:
+        return
+    payment = message.successful_payment
+    with session_scope() as db:
+        player, _ = get_or_create_player(db, message.from_user.id, message.from_user.username, message.from_user.first_name)
+        ok, text, payload = apply_star_purchase(
+            db,
+            telegram_user_id=message.from_user.id,
+            payload=payment.invoice_payload,
+            stars_amount=int(payment.total_amount),
+            telegram_payment_charge_id=payment.telegram_payment_charge_id,
+            provider_payment_charge_id=payment.provider_payment_charge_id,
+        )
+    await clean_answer(message, ("✅ " if ok else "⛔ ") + h(text), reply_markup=main_keyboard())
+
 
 
 async def run_bot_polling() -> None:

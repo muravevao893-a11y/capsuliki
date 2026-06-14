@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
-from app.models import ActionLog, ErrorLog, EventStatus, Expedition, GroupChat, GroupEvent, Pet, Player, Rarity, Trade, TradeStatus, utcnow
+from app.models import ActionLog, ErrorLog, EventStatus, Expedition, GroupChat, GroupEvent, Pet, Player, Rarity, StarPurchase, Trade, TradeStatus, utcnow
 
 
 RARITY_META: dict[str, dict[str, Any]] = {
@@ -87,6 +87,34 @@ CURRENT_SEASON: dict[str, Any] = {
     "description": "Первый тестовый сезон Капсуликов.",
     "days": 30,
 }
+
+STAR_PRODUCTS: dict[str, dict[str, Any]] = {
+    "support_15": {
+        "title": "⭐ Малый набор",
+        "description": "30 кристаллов, 120 пыли и 120 очков сезона.",
+        "stars": 15,
+        "reward": {"coins": 0, "crystals": 30, "dust": 120, "season_score": 120},
+    },
+    "rare_pack_35": {
+        "title": "🔵 Редкий набор",
+        "description": "80 кристаллов, 320 пыли и 300 очков сезона.",
+        "stars": 35,
+        "reward": {"coins": 300, "crystals": 80, "dust": 320, "season_score": 300},
+    },
+    "epic_pack_75": {
+        "title": "🟣 Эпический набор",
+        "description": "180 кристаллов, 850 пыли и 850 очков сезона.",
+        "stars": 75,
+        "reward": {"coins": 700, "crystals": 180, "dust": 850, "season_score": 850},
+    },
+    "legend_pack_149": {
+        "title": "🟡 Легендарный набор",
+        "description": "400 кристаллов, 1800 пыли и 2000 очков сезона.",
+        "stars": 149,
+        "reward": {"coins": 1500, "crystals": 400, "dust": 1800, "season_score": 2000},
+    },
+}
+
 
 EXPEDITIONS: dict[str, dict[str, Any]] = {
     "forest": {"name": "🌲 Лес", "minutes": 60, "min_power": 8, "coins": (20, 50), "crystals": (0, 1)},
@@ -1124,6 +1152,380 @@ def admin_give_pet(db: Session, telegram_user_id: int, species_alias: str) -> tu
 
 
 
+def stars_shop_payload(player: Player) -> dict[str, Any]:
+    return {
+        "enabled": True,
+        "balance": {
+            "coins": player.coins,
+            "crystals": player.crystals,
+            "dust": int(getattr(player, "capsule_dust", 0) or 0),
+            "season_score": int(getattr(player, "season_score", 0) or 0),
+        },
+        "products": [
+            {"key": key, **value}
+            for key, value in STAR_PRODUCTS.items()
+        ],
+    }
+
+
+def get_star_product(product_key: str) -> dict[str, Any] | None:
+    return STAR_PRODUCTS.get(product_key)
+
+
+def build_star_payload(player: Player, product_key: str) -> str:
+    return f"stars:{product_key}:{player.id}:{secrets.token_hex(5)}"
+
+
+def parse_star_payload(payload: str) -> tuple[str | None, int | None]:
+    try:
+        prefix, product_key, player_id, _nonce = payload.split(":", 3)
+        if prefix != "stars":
+            return None, None
+        return product_key, int(player_id)
+    except Exception:
+        return None, None
+
+
+def apply_star_purchase(
+    db: Session,
+    telegram_user_id: int,
+    payload: str,
+    stars_amount: int,
+    telegram_payment_charge_id: str | None = None,
+    provider_payment_charge_id: str | None = None,
+) -> tuple[bool, str, dict[str, Any] | None]:
+    product_key, player_id = parse_star_payload(payload)
+    if not product_key or not player_id:
+        return False, "Некорректный payload оплаты.", None
+
+    product = get_star_product(product_key)
+    if not product:
+        return False, "Товар не найден.", None
+
+    player = db.scalar(select(Player).where(Player.telegram_user_id == telegram_user_id))
+    if not player:
+        return False, "Игрок не найден.", None
+
+    if player.id != player_id:
+        return False, "Оплата не принадлежит этому игроку.", None
+
+    if int(product["stars"]) != int(stars_amount):
+        return False, "Сумма оплаты не совпадает с товаром.", None
+
+    if telegram_payment_charge_id:
+        existing = db.scalar(
+            select(StarPurchase).where(StarPurchase.telegram_payment_charge_id == telegram_payment_charge_id)
+        )
+        if existing:
+            return True, "Эта оплата уже была обработана.", {"already_processed": True, "product": product}
+
+    reward = dict(product["reward"])
+    player.coins += int(reward.get("coins", 0))
+    player.crystals += int(reward.get("crystals", 0))
+    player.capsule_dust = int(getattr(player, "capsule_dust", 0) or 0) + int(reward.get("dust", 0))
+    add_season_score(player, int(reward.get("season_score", 0)))
+
+    purchase = StarPurchase(
+        player_id=player.id,
+        telegram_payment_charge_id=telegram_payment_charge_id,
+        provider_payment_charge_id=provider_payment_charge_id,
+        payload=payload,
+        product_key=product_key,
+        stars_amount=int(stars_amount),
+        status="paid",
+        reward_json=json.dumps(reward, ensure_ascii=False),
+    )
+    db.add(purchase)
+    log(db, player.id, None, "stars_purchase", f"{product_key}:{stars_amount}")
+    db.flush()
+
+    parts = []
+    if reward.get("coins"):
+        parts.append(f"{reward['coins']} монет")
+    if reward.get("crystals"):
+        parts.append(f"{reward['crystals']} кристаллов")
+    if reward.get("dust"):
+        parts.append(f"{reward['dust']} пыли")
+    if reward.get("season_score"):
+        parts.append(f"{reward['season_score']} очков сезона")
+
+    return True, f"Спасибо за поддержку! Получено: {', '.join(parts)}.", {"product": product, "reward": reward}
+
+
+def purchase_history_payload(db: Session, player: Player, limit: int = 10) -> list[dict[str, Any]]:
+    rows = db.scalars(
+        select(StarPurchase)
+        .where(StarPurchase.player_id == player.id)
+        .order_by(desc(StarPurchase.created_at))
+        .limit(limit)
+    ).all()
+    result = []
+    for item in rows:
+        product = STAR_PRODUCTS.get(item.product_key, {"title": item.product_key})
+        result.append({
+            "id": item.id,
+            "title": product["title"],
+            "stars": item.stars_amount,
+            "status": item.status,
+            "created_at": item.created_at.isoformat(),
+            "reward": json.loads(item.reward_json or "{}"),
+        })
+    return result
+
+
+def admin_payments_payload(db: Session) -> dict[str, Any]:
+    total = int(db.scalar(select(func.count(StarPurchase.id))) or 0)
+    stars = int(db.scalar(select(func.coalesce(func.sum(StarPurchase.stars_amount), 0))) or 0)
+    recent = db.scalars(select(StarPurchase).order_by(desc(StarPurchase.created_at)).limit(10)).all()
+    return {
+        "total": total,
+        "stars": stars,
+        "recent": [
+            {
+                "id": item.id,
+                "player_id": item.player_id,
+                "product": item.product_key,
+                "stars": item.stars_amount,
+                "status": item.status,
+                "created_at": item.created_at.isoformat(),
+            }
+            for item in recent
+        ],
+    }
+
+
+
+def _count_actions(db: Session, action: str | None = None, since: datetime | None = None, prefix: str | None = None) -> int:
+    q = select(func.count(ActionLog.id))
+    if action:
+        q = q.where(ActionLog.action == action)
+    if prefix:
+        q = q.where(ActionLog.action.like(f"{prefix}%"))
+    if since:
+        q = q.where(ActionLog.created_at >= since)
+    return int(db.scalar(q) or 0)
+
+
+def _count_purchases(db: Session, since: datetime | None = None) -> tuple[int, int]:
+    q_count = select(func.count(StarPurchase.id))
+    q_stars = select(func.coalesce(func.sum(StarPurchase.stars_amount), 0))
+    if since:
+        q_count = q_count.where(StarPurchase.created_at >= since)
+        q_stars = q_stars.where(StarPurchase.created_at >= since)
+    return int(db.scalar(q_count) or 0), int(db.scalar(q_stars) or 0)
+
+
+def admin_dashboard_payload(db: Session) -> dict[str, Any]:
+    now = utcnow()
+    day = now - timedelta(days=1)
+    week = now - timedelta(days=7)
+    month = now - timedelta(days=30)
+    pay_day, stars_day = _count_purchases(db, day)
+    pay_week, stars_week = _count_purchases(db, week)
+    pay_month, stars_month = _count_purchases(db, month)
+    return {
+        "players": int(db.scalar(select(func.count(Player.id))) or 0),
+        "players_day": int(db.scalar(select(func.count(Player.id)).where(Player.created_at >= day)) or 0),
+        "groups": int(db.scalar(select(func.count(GroupChat.id))) or 0),
+        "pets": int(db.scalar(select(func.count(Pet.id))) or 0),
+        "opens_day": _count_actions(db, action="open_capsule", since=day),
+        "opens_week": _count_actions(db, action="open_capsule", since=week),
+        "care_day": int(db.scalar(select(func.count(ActionLog.id)).where(ActionLog.action.like("care_%"), ActionLog.created_at >= day)) or 0),
+        "quests_day": int(db.scalar(select(func.count(ActionLog.id)).where(ActionLog.action.like("quest_claim_%"), ActionLog.created_at >= day)) or 0),
+        "errors_day": int(db.scalar(select(func.count(ErrorLog.id)).where(ErrorLog.created_at >= day)) or 0),
+        "payments_total": int(db.scalar(select(func.count(StarPurchase.id))) or 0),
+        "stars_total": int(db.scalar(select(func.coalesce(func.sum(StarPurchase.stars_amount), 0))) or 0),
+        "payments_day": pay_day,
+        "stars_day": stars_day,
+        "payments_week": pay_week,
+        "stars_week": stars_week,
+        "payments_month": pay_month,
+        "stars_month": stars_month,
+        "season_score_total": int(db.scalar(select(func.coalesce(func.sum(Player.season_score), 0))) or 0),
+        "referrals_total": int(db.scalar(select(func.coalesce(func.sum(Player.referrals_count), 0))) or 0),
+    }
+
+
+def admin_users_payload(db: Session, limit: int = 15) -> list[dict[str, Any]]:
+    rows = db.scalars(select(Player).order_by(desc(Player.created_at)).limit(limit)).all()
+    return [
+        {
+            "id": p.id,
+            "telegram_user_id": p.telegram_user_id,
+            "username": p.username,
+            "name": hname(p),
+            "level": p.level,
+            "coins": p.coins,
+            "crystals": p.crystals,
+            "dust": int(getattr(p, "capsule_dust", 0) or 0),
+            "opened": p.capsules_opened,
+            "season_score": int(getattr(p, "season_score", 0) or 0),
+            "referrals": int(getattr(p, "referrals_count", 0) or 0),
+            "created_at": p.created_at.isoformat(),
+        }
+        for p in rows
+    ]
+
+
+def admin_find_player(db: Session, query: str) -> Player | None:
+    raw = (query or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("@"):
+        raw = raw[1:]
+    if raw.isdigit():
+        value = int(raw)
+        return db.scalar(select(Player).where((Player.telegram_user_id == value) | (Player.id == value)).limit(1))
+    return db.scalar(select(Player).where(func.lower(Player.username) == raw.lower()).limit(1))
+
+
+def admin_user_payload(db: Session, query: str) -> dict[str, Any] | None:
+    player = admin_find_player(db, query)
+    if not player:
+        return None
+    pets = int(db.scalar(select(func.count(Pet.id)).where(Pet.owner_player_id == player.id)) or 0)
+    unique_pets = int(db.scalar(select(func.count(func.distinct(Pet.species_key))).where(Pet.owner_player_id == player.id)) or 0)
+    pay_count = int(db.scalar(select(func.count(StarPurchase.id)).where(StarPurchase.player_id == player.id)) or 0)
+    pay_stars = int(db.scalar(select(func.coalesce(func.sum(StarPurchase.stars_amount), 0)).where(StarPurchase.player_id == player.id)) or 0)
+    referrer = db.get(Player, player.referrer_player_id) if player.referrer_player_id else None
+    last_actions = db.scalars(
+        select(ActionLog)
+        .where(ActionLog.player_id == player.id)
+        .order_by(desc(ActionLog.created_at))
+        .limit(8)
+    ).all()
+    return {
+        "id": player.id,
+        "telegram_user_id": player.telegram_user_id,
+        "username": player.username,
+        "name": hname(player),
+        "level": player.level,
+        "xp": player.xp,
+        "coins": player.coins,
+        "crystals": player.crystals,
+        "dust": int(getattr(player, "capsule_dust", 0) or 0),
+        "opened": player.capsules_opened,
+        "pets": pets,
+        "unique_pets": unique_pets,
+        "season_score": int(getattr(player, "season_score", 0) or 0),
+        "referrals": int(getattr(player, "referrals_count", 0) or 0),
+        "referrer": hname(referrer) if referrer else "",
+        "payments": pay_count,
+        "stars": pay_stars,
+        "created_at": player.created_at.isoformat(),
+        "updated_at": player.updated_at.isoformat(),
+        "actions": [
+            {
+                "action": item.action,
+                "text": item.text,
+                "created_at": item.created_at.isoformat(),
+            }
+            for item in last_actions
+        ],
+    }
+
+
+def admin_revenue_payload(db: Session) -> dict[str, Any]:
+    now = utcnow()
+    ranges = {
+        "24h": now - timedelta(days=1),
+        "7d": now - timedelta(days=7),
+        "30d": now - timedelta(days=30),
+    }
+    data = {}
+    for label, since in ranges.items():
+        count, stars = _count_purchases(db, since)
+        data[label] = {"count": count, "stars": stars}
+    total_count, total_stars = _count_purchases(db, None)
+    return {
+        "total": {"count": total_count, "stars": total_stars},
+        "ranges": data,
+    }
+
+
+def admin_products_payload(db: Session) -> list[dict[str, Any]]:
+    rows = db.execute(
+        select(
+            StarPurchase.product_key,
+            func.count(StarPurchase.id),
+            func.coalesce(func.sum(StarPurchase.stars_amount), 0),
+        )
+        .group_by(StarPurchase.product_key)
+        .order_by(desc(func.coalesce(func.sum(StarPurchase.stars_amount), 0)))
+    ).all()
+    result = []
+    for product_key, count, stars in rows:
+        product = STAR_PRODUCTS.get(product_key, {"title": product_key})
+        result.append({"key": product_key, "title": product["title"], "count": int(count), "stars": int(stars)})
+    return result
+
+
+def admin_top_donors_payload(db: Session, limit: int = 10) -> list[dict[str, Any]]:
+    rows = db.execute(
+        select(
+            Player,
+            func.count(StarPurchase.id).label("payments"),
+            func.coalesce(func.sum(StarPurchase.stars_amount), 0).label("stars"),
+        )
+        .join(StarPurchase, StarPurchase.player_id == Player.id)
+        .group_by(Player.id)
+        .order_by(desc("stars"))
+        .limit(limit)
+    ).all()
+    return [
+        {
+            "id": player.id,
+            "telegram_user_id": player.telegram_user_id,
+            "username": player.username,
+            "name": hname(player),
+            "payments": int(payments),
+            "stars": int(stars),
+        }
+        for player, payments, stars in rows
+    ]
+
+
+def admin_referrals_payload(db: Session, limit: int = 10) -> list[dict[str, Any]]:
+    rows = db.scalars(
+        select(Player)
+        .where(Player.referrals_count > 0)
+        .order_by(desc(Player.referrals_count), desc(Player.season_score))
+        .limit(limit)
+    ).all()
+    return [
+        {
+            "id": player.id,
+            "telegram_user_id": player.telegram_user_id,
+            "username": player.username,
+            "name": hname(player),
+            "referrals": int(getattr(player, "referrals_count", 0) or 0),
+            "season_score": int(getattr(player, "season_score", 0) or 0),
+        }
+        for player in rows
+    ]
+
+
+def admin_economy_payload(db: Session) -> dict[str, Any]:
+    players = int(db.scalar(select(func.count(Player.id))) or 0)
+    coins = int(db.scalar(select(func.coalesce(func.sum(Player.coins), 0))) or 0)
+    crystals = int(db.scalar(select(func.coalesce(func.sum(Player.crystals), 0))) or 0)
+    dust = int(db.scalar(select(func.coalesce(func.sum(Player.capsule_dust), 0))) or 0)
+    pets = int(db.scalar(select(func.count(Pet.id))) or 0)
+    opened = int(db.scalar(select(func.coalesce(func.sum(Player.capsules_opened), 0))) or 0)
+    return {
+        "players": players,
+        "coins": coins,
+        "crystals": crystals,
+        "dust": dust,
+        "pets": pets,
+        "opened": opened,
+        "avg_coins": round(coins / players, 2) if players else 0,
+        "avg_crystals": round(crystals / players, 2) if players else 0,
+        "avg_dust": round(dust / players, 2) if players else 0,
+    }
+
+
+
 def admin_stats(db: Session) -> dict[str, Any]:
     since = utcnow() - timedelta(days=1)
     return {
@@ -1134,4 +1536,6 @@ def admin_stats(db: Session) -> dict[str, Any]:
         "group_events_active": int(db.scalar(select(func.count(GroupEvent.id)).where(GroupEvent.status == EventStatus.ACTIVE.value)) or 0),
         "trades_pending": int(db.scalar(select(func.count(Trade.id)).where(Trade.status == TradeStatus.PENDING.value)) or 0),
         "errors": int(db.scalar(select(func.count(ErrorLog.id)).where(ErrorLog.created_at >= since)) or 0),
+        "payments": int(db.scalar(select(func.count(StarPurchase.id))) or 0),
+        "stars": int(db.scalar(select(func.coalesce(func.sum(StarPurchase.stars_amount), 0))) or 0),
     }

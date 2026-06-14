@@ -49,7 +49,7 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Капсулики Bot", description="Telegram capsule-pet collection game bot.", version="0.7", lifespan=lifespan)
+    app = FastAPI(title="Капсулики Bot", description="Telegram capsule-pet collection game bot.", version="0.9", lifespan=lifespan)
     app.include_router(api_router)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 

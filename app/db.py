@@ -82,6 +82,8 @@ def run_light_migrations() -> None:
     _create_index_if_missing("ix_group_chats_status_last_event", "CREATE INDEX IF NOT EXISTS ix_group_chats_status_last_event ON group_chats (status, last_event_at)")
     _create_index_if_missing("ix_error_logs_created", "CREATE INDEX IF NOT EXISTS ix_error_logs_created ON error_logs (created_at)")
     _create_index_if_missing("ix_error_logs_chat_created", "CREATE INDEX IF NOT EXISTS ix_error_logs_chat_created ON error_logs (chat_id, created_at)")
+    _create_index_if_missing("ix_star_purchases_payload", "CREATE INDEX IF NOT EXISTS ix_star_purchases_payload ON star_purchases (payload)")
+    _create_index_if_missing("ix_star_purchases_player_created", "CREATE INDEX IF NOT EXISTS ix_star_purchases_player_created ON star_purchases (player_id, created_at)")
 
 
 def init_db() -> None:
