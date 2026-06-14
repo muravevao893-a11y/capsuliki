@@ -10,7 +10,7 @@ from typing import Any
 from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
-from app.models import ActionLog, EventStatus, Expedition, GroupEvent, Pet, Player, Rarity, Trade, TradeStatus, utcnow
+from app.models import ActionLog, ErrorLog, EventStatus, Expedition, GroupChat, GroupEvent, Pet, Player, Rarity, Trade, TradeStatus, utcnow
 
 
 RARITY_META: dict[str, dict[str, Any]] = {
@@ -120,6 +120,151 @@ def hname(player: Player) -> str:
 
 def log(db: Session, player_id: int | None, chat_id: int | None, action: str, text: str = "") -> None:
     db.add(ActionLog(player_id=player_id, chat_id=chat_id, action=action, text=text[:2000]))
+
+
+def log_error(
+    db: Session,
+    source: str,
+    error: BaseException | str,
+    traceback_text: str | None = None,
+    chat_id: int | None = None,
+    user_id: int | None = None,
+    update_json: str | None = None,
+) -> ErrorLog:
+    if isinstance(error, BaseException):
+        error_type = error.__class__.__name__
+        message = str(error) or error_type
+    else:
+        error_type = "Error"
+        message = str(error)
+    item = ErrorLog(
+        source=str(source or "bot")[:80],
+        error_type=error_type[:160],
+        message=message[:4000],
+        traceback_text=(traceback_text or "")[:12000] or None,
+        chat_id=chat_id,
+        user_id=user_id,
+        update_json=(update_json or "")[:12000] or None,
+    )
+    db.add(item)
+    db.flush()
+    return item
+
+
+def admin_errors_payload(db: Session, limit: int = 12) -> list[dict[str, Any]]:
+    rows = db.scalars(select(ErrorLog).order_by(desc(ErrorLog.created_at)).limit(limit)).all()
+    return [
+        {
+            "id": item.id,
+            "source": item.source,
+            "type": item.error_type,
+            "message": item.message,
+            "chat_id": item.chat_id,
+            "user_id": item.user_id,
+            "created_at": item.created_at.isoformat(),
+        }
+        for item in rows
+    ]
+
+
+def register_group_chat(db: Session, chat_id: int, title: str | None, player: Player | None = None) -> GroupChat:
+    group = db.scalar(select(GroupChat).where(GroupChat.chat_id == chat_id))
+    if not group:
+        group = GroupChat(chat_id=chat_id, title=title or "Чат", last_activity_at=utcnow())
+        db.add(group)
+        db.flush()
+    else:
+        group.title = title or group.title
+        group.last_activity_at = utcnow()
+    group.messages_seen += 1
+    if player:
+        seen = db.scalar(
+            select(ActionLog.id)
+            .where(ActionLog.chat_id == chat_id, ActionLog.player_id == player.id, ActionLog.action == "group_seen")
+            .limit(1)
+        )
+        if not seen:
+            group.players_seen += 1
+            log(db, player.id, chat_id, "group_seen", "player seen in group")
+    return group
+
+
+def group_chats_for_events(db: Session, limit: int = 10, min_minutes: int = 45) -> list[GroupChat]:
+    cutoff = utcnow() - timedelta(minutes=max(5, min_minutes))
+    return db.scalars(
+        select(GroupChat)
+        .where(
+            GroupChat.status == "active",
+            GroupChat.last_activity_at.is_not(None),
+            (GroupChat.last_event_at.is_(None) | (GroupChat.last_event_at <= cutoff)),
+        )
+        .order_by(GroupChat.last_event_at.asc().nullsfirst())
+        .limit(limit)
+    ).all()
+
+
+def mark_group_event_sent(group: GroupChat) -> None:
+    group.last_event_at = utcnow()
+
+
+def button_rate_limited(db: Session, chat_id: int, player: Player, action: str, seconds: int = 2) -> tuple[bool, int]:
+    since = utcnow() - timedelta(seconds=max(1, seconds))
+    row = db.scalar(
+        select(ActionLog)
+        .where(
+            ActionLog.chat_id == chat_id,
+            ActionLog.player_id == player.id,
+            ActionLog.action == action,
+            ActionLog.created_at >= since,
+        )
+        .order_by(desc(ActionLog.created_at))
+        .limit(1)
+    )
+    if row:
+        left = max(1, int(((aware(row.created_at) + timedelta(seconds=seconds)) - utcnow()).total_seconds()) + 1)
+        return True, left
+    log(db, player.id, chat_id, action, "rate marker")
+    db.flush()
+    return False, 0
+
+
+def profile_payload(db: Session, player: Player) -> dict[str, Any]:
+    pets = db.scalars(select(Pet).where(Pet.owner_player_id == player.id)).all()
+    favorite = favorite_pet(db, player)
+    rarest = None
+    rarity_rank = {name: idx for idx, name in enumerate(RARITY_ORDER)}
+    for pet in pets:
+        if rarest is None or rarity_rank.get(pet.rarity, 0) > rarity_rank.get(rarest.rarity, 0):
+            rarest = pet
+    return {
+        "name": hname(player),
+        "level": player.level,
+        "xp": player.xp,
+        "coins": player.coins,
+        "crystals": player.crystals,
+        "dust": int(getattr(player, "capsule_dust", 0) or 0),
+        "capsules_opened": player.capsules_opened,
+        "pets_total": len(pets),
+        "collection_total": len(SPECIES),
+        "favorite": pet_payload(favorite) if favorite else None,
+        "rarest": pet_payload(rarest) if rarest else None,
+    }
+
+
+def group_registry_payload(db: Session, limit: int = 20) -> list[dict[str, Any]]:
+    rows = db.scalars(select(GroupChat).order_by(desc(GroupChat.last_activity_at)).limit(limit)).all()
+    return [
+        {
+            "chat_id": item.chat_id,
+            "title": item.title,
+            "status": item.status,
+            "players_seen": item.players_seen,
+            "messages_seen": item.messages_seen,
+            "last_activity_at": item.last_activity_at.isoformat() if item.last_activity_at else "",
+            "last_event_at": item.last_event_at.isoformat() if item.last_event_at else "",
+        }
+        for item in rows
+    ]
 
 
 def get_or_create_player(db: Session, telegram_user_id: int, username: str | None, first_name: str | None) -> tuple[Player, bool]:
@@ -597,6 +742,12 @@ def catch_group_pet(db: Session, chat_id: int, player: Player, event_id: int) ->
     if not event or event.chat_id != chat_id or event.status != EventStatus.ACTIVE.value or event.event_type != "catch":
         return False, "Капсулик уже убежал.", None
     data = json.loads(event.data_json or "{}")
+    attempts = data.get("attempts") or []
+    if player.telegram_user_id in attempts:
+        return False, "Ты уже пробовал поймать этого капсулика.", None
+    attempts.append(player.telegram_user_id)
+    data["attempts"] = attempts
+    event.data_json = json.dumps(data, ensure_ascii=False)
     chance = 45 + min(35, player.level * 2)
     if random.randint(1, 100) <= chance:
         species = data["species"]
@@ -649,8 +800,10 @@ def admin_stats(db: Session) -> dict[str, Any]:
     since = utcnow() - timedelta(days=1)
     return {
         "players": int(db.scalar(select(func.count(Player.id))) or 0),
+        "groups": int(db.scalar(select(func.count(GroupChat.id))) or 0),
         "pets": int(db.scalar(select(func.count(Pet.id))) or 0),
         "opens_day": int(db.scalar(select(func.count(ActionLog.id)).where(ActionLog.action == "open_capsule", ActionLog.created_at >= since)) or 0),
         "group_events_active": int(db.scalar(select(func.count(GroupEvent.id)).where(GroupEvent.status == EventStatus.ACTIVE.value)) or 0),
         "trades_pending": int(db.scalar(select(func.count(Trade.id)).where(Trade.status == TradeStatus.PENDING.value)) or 0),
+        "errors": int(db.scalar(select(func.count(ErrorLog.id)).where(ErrorLog.created_at >= since)) or 0),
     }

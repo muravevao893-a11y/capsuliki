@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import traceback
 from typing import Any
 
-from aiogram import Bot, Dispatcher, F, Router
+from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatType, ParseMode
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, ErrorEvent, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy import select
 
 from app.config import get_settings
@@ -20,6 +21,14 @@ from app.game import (
     shop_payload,
     EXPEDITIONS,
     accept_trade,
+    admin_errors_payload,
+    button_rate_limited,
+    group_chats_for_events,
+    group_registry_payload,
+    log_error,
+    mark_group_event_sent,
+    profile_payload,
+    register_group_chat,
     admin_stats,
     care_pet,
     catch_group_pet,
@@ -46,6 +55,33 @@ router = Router(name="capsuliki-router")
 BRAND = "Капсулики"
 
 
+class CallbackThrottleMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        if isinstance(event, CallbackQuery) and event.from_user and isinstance(event.message, Message):
+            try:
+                with session_scope() as db:
+                    player, _ = get_or_create_player(db, event.from_user.id, event.from_user.username, event.from_user.first_name)
+                    limited, left = button_rate_limited(db, event.message.chat.id, player, "callback", seconds=2)
+                if limited:
+                    await event.answer(f"⏳ {left} сек.", show_alert=False)
+                    return None
+            except Exception:
+                logger.debug("callback throttle failed", exc_info=True)
+        return await handler(event, data)
+
+
+def _short_trace(exc: BaseException) -> str:
+    return "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))[-12000:]
+
+
+def store_runtime_error(source: str, exc: BaseException, chat_id: int | None = None, user_id: int | None = None, update_json: str | None = None) -> None:
+    try:
+        with session_scope() as db:
+            log_error(db, source, exc, traceback_text=_short_trace(exc), chat_id=chat_id, user_id=user_id, update_json=update_json)
+    except Exception:
+        logger.exception("Could not store runtime error")
+
+
 def h(value: Any) -> str:
     return html.escape(str(value), quote=False)
 
@@ -66,7 +102,7 @@ def main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎁 Открыть капсулу", callback_data="cap:open")],
         [InlineKeyboardButton(text="📖 Альбом", callback_data="cap:album:0"), InlineKeyboardButton(text="🛒 Магазин", callback_data="cap:shop")],
-        [InlineKeyboardButton(text="👤 Моя коллекция", callback_data="cap:my"), InlineKeyboardButton(text="🐾 Любимчик", callback_data="cap:pet")],
+        [InlineKeyboardButton(text="👤 Профиль", callback_data="cap:profile"), InlineKeyboardButton(text="🐾 Любимчик", callback_data="cap:pet")],
         [InlineKeyboardButton(text="🎒 Экспедиции", callback_data="cap:expeditions"), InlineKeyboardButton(text="🏆 Топ", callback_data="cap:top")],
     ])
 
@@ -292,14 +328,58 @@ def render_album(payload: dict[str, Any]) -> str:
 
 
 
+
+def render_profile(payload: dict[str, Any]) -> str:
+    favorite = payload.get("favorite")
+    rarest = payload.get("rarest")
+    lines = [
+        "👤 <b>Профиль коллекционера</b>",
+        "",
+        f"Игрок: <b>{h(payload['name'])}</b>",
+        f"Уровень: <b>{payload['level']}</b> · XP: <b>{payload['xp']}</b>",
+        f"Питомцев: <b>{payload['pets_total']}</b>/<b>{payload['collection_total']}</b>",
+        f"Капсул открыто: <b>{payload['capsules_opened']}</b>",
+        f"Монеты: <b>{payload['coins']}</b> · Кристаллы: <b>{payload['crystals']}</b> · Пыль: <b>{payload['dust']}</b>",
+    ]
+    if favorite:
+        lines.append(f"Любимчик: <b>{h(favorite['title'])}</b> · {favorite['rarity_name']}")
+    if rarest:
+        lines.append(f"Редчайший: <b>{h(rarest['title'])}</b> · {rarest['rarity_name']}")
+    return "\n".join(lines)
+
+
+def render_admin_errors(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return "🧯 <b>Ошибки</b>\n\nЧисто."
+    lines = ["🧯 <b>Последние ошибки</b>", ""]
+    for item in items:
+        msg = str(item.get("message", ""))[:110]
+        lines.append(f"#{item['id']} · <b>{h(item['type'])}</b> · chat <code>{h(item.get('chat_id'))}</code>")
+        lines.append(f"└ {h(msg)}")
+    return "\n".join(lines)
+
+
+def render_admin_groups(items: list[dict[str, Any]]) -> str:
+    if not items:
+        return "👥 <b>Группы</b>\n\nБот пока не видел группы."
+    lines = ["👥 <b>Группы бота</b>", ""]
+    for item in items:
+        lines.append(
+            f"• <b>{h(item['title'])}</b> · игроков {item['players_seen']} · сообщений {item['messages_seen']}"
+        )
+    return "\n".join(lines)
+
+
 def render_stats(payload: dict[str, Any]) -> str:
     return (
         "🛠 <b>Статистика</b>\n\n"
         f"Игроков: <b>{payload['players']}</b>\n"
+        f"Групп: <b>{payload.get('groups', 0)}</b>\n"
         f"Питомцев: <b>{payload['pets']}</b>\n"
         f"Открытий за 24ч: <b>{payload['opens_day']}</b>\n"
         f"Активных групповых событий: <b>{payload['group_events_active']}</b>\n"
-        f"Обменов в ожидании: <b>{payload['trades_pending']}</b>"
+        f"Обменов в ожидании: <b>{payload['trades_pending']}</b>\n"
+        f"Ошибок за 24ч: <b>{payload.get('errors', 0)}</b>"
     )
 
 
@@ -317,6 +397,11 @@ async def cmd_start(message: Message) -> None:
     if is_private(message):
         await message.answer(render_help(), reply_markup=main_keyboard())
     else:
+        with session_scope() as db:
+            player = None
+            if message.from_user and not message.from_user.is_bot:
+                player, _ = get_or_create_player(db, message.from_user.id, message.from_user.username, message.from_user.first_name)
+            register_group_chat(db, message.chat.id, message.chat.title or "Чат", player)
         await message.answer(
             "🎁 <b>Капсулики в чате!</b>\n\n"
             "Открывай капсулы в личке или прямо здесь. Иногда в группу будут залетать редкие капсулики и боссы.",
@@ -449,6 +534,34 @@ async def cmd_top(message: Message) -> None:
     await message.answer(render_top(items), reply_markup=main_keyboard())
 
 
+@router.message(Command("profile"))
+async def cmd_profile(message: Message) -> None:
+    if not message.from_user:
+        return
+    with session_scope() as db:
+        player, _ = get_or_create_player(db, message.from_user.id, message.from_user.username, message.from_user.first_name)
+        payload = profile_payload(db, player)
+    await message.answer(render_profile(payload), reply_markup=main_keyboard())
+
+
+@router.message(Command("admin_errors"))
+async def cmd_admin_errors(message: Message) -> None:
+    if not is_admin_user(message.from_user.id if message.from_user else None):
+        return
+    with session_scope() as db:
+        items = admin_errors_payload(db)
+    await message.answer(render_admin_errors(items))
+
+
+@router.message(Command("admin_groups"))
+async def cmd_admin_groups(message: Message) -> None:
+    if not is_admin_user(message.from_user.id if message.from_user else None):
+        return
+    with session_scope() as db:
+        items = group_registry_payload(db)
+    await message.answer(render_admin_groups(items))
+
+
 @router.message(Command("trade"))
 async def cmd_trade(message: Message, command: CommandObject) -> None:
     if not message.from_user:
@@ -499,7 +612,9 @@ async def cmd_spawn(message: Message) -> None:
         await message.answer("Только админ проекта.")
         return
     with session_scope() as db:
+        group = register_group_chat(db, message.chat.id, message.chat.title or "Чат")
         event = spawn_catch_event(db, message.chat.id, message.chat.title or "Чат")
+        mark_group_event_sent(group)
         data = __import__("json").loads(event.data_json)
         species = data["species"]
     await message.answer(
@@ -519,7 +634,9 @@ async def cmd_boss(message: Message) -> None:
         await message.answer("Только админ проекта.")
         return
     with session_scope() as db:
+        group = register_group_chat(db, message.chat.id, message.chat.title or "Чат")
         event = spawn_boss_event(db, message.chat.id, message.chat.title or "Чат")
+        mark_group_event_sent(group)
         data = __import__("json").loads(event.data_json)
         boss = data["boss"]
     await message.answer(
@@ -535,6 +652,19 @@ async def cmd_admin_stats(message: Message) -> None:
     with session_scope() as db:
         payload = admin_stats(db)
     await message.answer(render_stats(payload))
+
+
+@router.message(F.chat.type.in_({"group", "supergroup"}))
+async def track_group_activity(message: Message) -> None:
+    if not message.from_user or message.from_user.is_bot:
+        return
+    try:
+        with session_scope() as db:
+            player, _ = get_or_create_player(db, message.from_user.id, message.from_user.username, message.from_user.first_name)
+            register_group_chat(db, message.chat.id, message.chat.title or "Чат", player)
+    except Exception as exc:
+        store_runtime_error("group_tracker", exc, chat_id=message.chat.id, user_id=message.from_user.id)
+
 
 
 @router.callback_query(F.data == "cap:menu")
@@ -611,6 +741,16 @@ async def cb_set_fav(callback: CallbackQuery) -> None:
             ok, text = set_favorite(db, player, pet_id)
         await callback.message.answer(("✅ " if ok else "⛔ ") + h(text), reply_markup=main_keyboard())
 
+
+
+@router.callback_query(F.data == "cap:profile")
+async def cb_profile(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if callback.from_user and isinstance(callback.message, Message):
+        with session_scope() as db:
+            player, _ = get_or_create_player(db, callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+            payload = profile_payload(db, player)
+        await callback.message.answer(render_profile(payload), reply_markup=main_keyboard())
 
 
 @router.callback_query(F.data == "cap:my")
@@ -722,16 +862,74 @@ async def cb_boss_hit(callback: CallbackQuery) -> None:
     await callback.message.answer(text + hp_line, reply_markup=boss_keyboard(event_id) if data and data.get("hp", 0) > 0 else None)
 
 
+@router.errors()
+async def on_router_error(event: ErrorEvent) -> bool:
+    exc = event.exception
+    chat_id = None
+    user_id = None
+    update_json = None
+    try:
+        update = event.update
+        update_json = update.model_dump_json(exclude_none=True) if hasattr(update, "model_dump_json") else str(update)
+        message = getattr(update, "message", None)
+        callback = getattr(update, "callback_query", None)
+        if callback and getattr(callback, "from_user", None):
+            user_id = callback.from_user.id
+            if getattr(callback, "message", None):
+                message = callback.message
+        if message and getattr(message, "chat", None):
+            chat_id = message.chat.id
+        if message and getattr(message, "from_user", None):
+            user_id = message.from_user.id
+    except Exception:
+        pass
+    store_runtime_error("router", exc, chat_id=chat_id, user_id=user_id, update_json=update_json)
+    logger.exception("Router error stored", exc_info=exc)
+    return True
+
+
 async def group_event_loop(bot: Bot) -> None:
     settings = get_settings()
     while True:
         try:
             await asyncio.sleep(max(60, settings.group_event_interval_minutes * 60))
-            # MVP does not know all group chats until messages happen; events are manual/admin in v0.1.
-            # Loop is reserved for v0.2 when chat registry is added.
+            with session_scope() as db:
+                groups = group_chats_for_events(db, limit=5, min_minutes=settings.group_event_interval_minutes)
+                jobs = []
+                for group in groups:
+                    if group.messages_seen < 3:
+                        continue
+                    if group.players_seen < 1:
+                        continue
+                    if __import__("random").random() < 0.72:
+                        event = spawn_catch_event(db, group.chat_id, group.title)
+                        data = __import__("json").loads(event.data_json)
+                        species = data["species"]
+                        text = (
+                            f"✨ <b>В чат залетел редкий капсулик!</b>\n\n"
+                            f"{species['emoji']} <b>{h(species['name'])}</b>\n"
+                            f"Кто успеет — попробует поймать."
+                        )
+                        jobs.append(("catch", group.chat_id, text, event.id))
+                    else:
+                        event = spawn_boss_event(db, group.chat_id, group.title)
+                        data = __import__("json").loads(event.data_json)
+                        boss = data["boss"]
+                        text = f"🐲 <b>Босс появился!</b>\n\n{boss['emoji']} <b>{h(boss['name'])}</b>\nHP: <b>{boss['hp']}</b>"
+                        jobs.append(("boss", group.chat_id, text, event.id))
+                    mark_group_event_sent(group)
+            for kind, chat_id, text, event_id in jobs:
+                try:
+                    if kind == "catch":
+                        await bot.send_message(chat_id, text, reply_markup=catch_keyboard(event_id))
+                    else:
+                        await bot.send_message(chat_id, text, reply_markup=boss_keyboard(event_id))
+                except Exception as exc:
+                    store_runtime_error("group_event_send", exc, chat_id=chat_id)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
+            store_runtime_error("group_event_loop", exc)
             logger.exception("group event loop failed")
 
 
@@ -742,6 +940,7 @@ async def run_bot_polling() -> None:
         return
     bot = Bot(token=settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher()
+    dp.callback_query.middleware(CallbackThrottleMiddleware())
     dp.include_router(router)
     task: asyncio.Task | None = None
     try:

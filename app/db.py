@@ -74,6 +74,9 @@ def run_light_migrations() -> None:
     _create_index_if_missing("ix_pets_owner", "CREATE INDEX IF NOT EXISTS ix_pets_owner ON pets (owner_player_id)")
     _create_index_if_missing("ix_events_chat", "CREATE INDEX IF NOT EXISTS ix_group_events_chat ON group_events (chat_id, status)")
     _create_index_if_missing("ix_logs_created", "CREATE INDEX IF NOT EXISTS ix_action_logs_created ON action_logs (created_at)")
+    _create_index_if_missing("ix_group_chats_status_last_event", "CREATE INDEX IF NOT EXISTS ix_group_chats_status_last_event ON group_chats (status, last_event_at)")
+    _create_index_if_missing("ix_error_logs_created", "CREATE INDEX IF NOT EXISTS ix_error_logs_created ON error_logs (created_at)")
+    _create_index_if_missing("ix_error_logs_chat_created", "CREATE INDEX IF NOT EXISTS ix_error_logs_chat_created ON error_logs (chat_id, created_at)")
 
 
 def init_db() -> None:

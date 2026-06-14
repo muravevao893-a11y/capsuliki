@@ -124,6 +124,42 @@ class Trade(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
 
+class GroupChat(Base):
+    __tablename__ = "group_chats"
+    __table_args__ = (
+        Index("ix_group_chats_status_last_event", "status", "last_event_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(255), default="Чат", nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
+    players_seen: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    messages_seen: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_activity_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_event_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class ErrorLog(Base):
+    __tablename__ = "error_logs"
+    __table_args__ = (
+        Index("ix_error_logs_created", "created_at"),
+        Index("ix_error_logs_chat_created", "chat_id", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source: Mapped[str] = mapped_column(String(80), default="bot", nullable=False)
+    error_type: Mapped[str] = mapped_column(String(160), nullable=False)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    traceback_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    chat_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    user_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    update_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+
 class ActionLog(Base):
     __tablename__ = "action_logs"
 
