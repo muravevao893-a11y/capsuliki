@@ -15,6 +15,9 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.db import session_scope
 from app.game import (
+    CAPSULE_TYPES,
+    album_payload,
+    shop_payload,
     EXPEDITIONS,
     accept_trade,
     admin_stats,
@@ -62,8 +65,48 @@ def is_admin_user(user_id: int | None) -> bool:
 def main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎁 Открыть капсулу", callback_data="cap:open")],
+        [InlineKeyboardButton(text="📖 Альбом", callback_data="cap:album:0"), InlineKeyboardButton(text="🛒 Магазин", callback_data="cap:shop")],
         [InlineKeyboardButton(text="👤 Моя коллекция", callback_data="cap:my"), InlineKeyboardButton(text="🐾 Любимчик", callback_data="cap:pet")],
         [InlineKeyboardButton(text="🎒 Экспедиции", callback_data="cap:expeditions"), InlineKeyboardButton(text="🏆 Топ", callback_data="cap:top")],
+    ])
+
+
+
+def capsule_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎁 Ежедневная", callback_data="cap:open:daily")],
+        [InlineKeyboardButton(text="⚪ Обычная", callback_data="cap:open:common"), InlineKeyboardButton(text="🔵 Редкая", callback_data="cap:open:rare")],
+        [InlineKeyboardButton(text="🟣 Эпическая", callback_data="cap:open:epic"), InlineKeyboardButton(text="🟡 Легендарная", callback_data="cap:open:legendary")],
+        [InlineKeyboardButton(text="🛒 Магазин", callback_data="cap:shop"), InlineKeyboardButton(text="🏠 Меню", callback_data="cap:menu")],
+    ])
+
+
+def album_keyboard(page: int, total: int, pet_id: int | None = None) -> InlineKeyboardMarkup:
+    prev_page = max(0, page - 1)
+    next_page = min(max(0, total - 1), page + 1)
+    rows: list[list[InlineKeyboardButton]] = []
+    if total > 1:
+        rows.append([
+            InlineKeyboardButton(text="⬅️ Назад", callback_data=f"cap:album:{prev_page}"),
+            InlineKeyboardButton(text=f"{page + 1}/{total}", callback_data=f"cap:album:{page}"),
+            InlineKeyboardButton(text="➡️ Далее", callback_data=f"cap:album:{next_page}"),
+        ])
+    if pet_id:
+        rows.append([
+            InlineKeyboardButton(text="⭐ Любимчик", callback_data=f"cap:setfav:{pet_id}"),
+            InlineKeyboardButton(text="🎒 В экспедицию", callback_data="cap:expeditions"),
+        ])
+    rows.append([InlineKeyboardButton(text="🏠 Меню", callback_data="cap:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def shop_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⚪ Открыть обычную", callback_data="cap:open:common")],
+        [InlineKeyboardButton(text="🔵 Открыть редкую", callback_data="cap:open:rare")],
+        [InlineKeyboardButton(text="🟣 Открыть эпическую", callback_data="cap:open:epic")],
+        [InlineKeyboardButton(text="🟡 Открыть легендарную", callback_data="cap:open:legendary")],
+        [InlineKeyboardButton(text="🏠 Меню", callback_data="cap:menu")],
     ])
 
 
@@ -116,7 +159,7 @@ def render_collection(payload: dict[str, Any]) -> str:
         "",
         f"Игрок: <b>{h(p['name'])}</b>",
         f"Уровень: <b>{p['level']}</b> · XP: <b>{p['xp']}</b>",
-        f"Монеты: <b>{p['coins']}</b> · Кристаллы: <b>{p['crystals']}</b>",
+        f"Монеты: <b>{p['coins']}</b> · Кристаллы: <b>{p['crystals']}</b> · Пыль: <b>{p.get('dust', 0)}</b>",
         f"Капсул открыто: <b>{p['opened']}</b> · серия: <b>{p['streak']}</b>",
         f"Питомцев: <b>{payload['total']}</b>",
         "",
@@ -197,6 +240,58 @@ def render_top(items: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+
+def render_capsules() -> str:
+    lines = ["🎁 <b>Капсулы</b>", ""]
+    for key, spec in CAPSULE_TYPES.items():
+        cost = "бесплатно"
+        if spec.get("cost"):
+            parts = []
+            if spec["cost"].get("coins"):
+                parts.append(f"{spec['cost']['coins']} монет")
+            if spec["cost"].get("crystals"):
+                parts.append(f"{spec['cost']['crystals']} кристаллов")
+            if spec["cost"].get("dust"):
+                parts.append(f"{spec['cost']['dust']} пыли")
+            cost = ", ".join(parts)
+        lines.append(f"• <b>{spec['name']}</b> — {h(cost)}")
+        lines.append(f"  {h(spec['description'])}")
+    lines.append("\nКоманда: <code>/open rare</code>, <code>/open epic</code> и так далее.")
+    return "\n".join(lines)
+
+
+def render_shop(payload: dict[str, Any]) -> str:
+    lines = [
+        "🛒 <b>Магазин капсул</b>",
+        "",
+        f"Монеты: <b>{payload['coins']}</b>",
+        f"Кристаллы: <b>{payload['crystals']}</b>",
+        f"Пыль капсул: <b>{payload['dust']}</b>",
+        "",
+    ]
+    for item in payload["capsules"]:
+        lines.append(f"• <b>{item['name']}</b> — {h(item['cost'])}")
+        lines.append(f"  {h(item['description'])}")
+    return "\n".join(lines)
+
+
+def render_album(payload: dict[str, Any]) -> str:
+    if not payload.get("pet"):
+        return "📖 <b>Альбом пуст</b>\n\nОткрой первую капсулу: /open"
+    pet = payload["pet"]
+    return (
+        f"📖 <b>Альбом коллекции</b>\n"
+        f"{payload['page'] + 1}/{payload['total']}\n\n"
+        f"{h(pet['title'])}\n"
+        f"Редкость: <b>{pet['rarity_name']}</b>\n"
+        f"Уровень: <b>{pet['level']}</b> · Сила: <b>{pet['power']}</b>\n"
+        f"Стихия: <b>{h(pet['element'])}</b>\n"
+        f"Характер: <b>{h(pet['character'])}</b>\n"
+        f"Навык: <b>{h(pet['skill'])}</b>"
+    )
+
+
+
 def render_stats(payload: dict[str, Any]) -> str:
     return (
         "🛠 <b>Статистика</b>\n\n"
@@ -239,18 +334,58 @@ async def cmd_menu(message: Message) -> None:
     await message.answer("🏠 <b>Меню Капсуликов</b>", reply_markup=main_keyboard())
 
 
-@router.message(Command("open"))
-async def cmd_open(message: Message) -> None:
+@router.message(Command("capsules"))
+async def cmd_capsules(message: Message) -> None:
+    await message.answer(render_capsules(), reply_markup=capsule_keyboard())
+
+
+@router.message(Command("shop"))
+async def cmd_shop(message: Message) -> None:
     if not message.from_user:
         return
     with session_scope() as db:
         player, _ = get_or_create_player(db, message.from_user.id, message.from_user.username, message.from_user.first_name)
-        ok, text, pet = open_capsule(db, player)
+        payload = shop_payload(player)
+    await message.answer(render_shop(payload), reply_markup=shop_keyboard())
+
+
+@router.message(Command("album"))
+async def cmd_album(message: Message, command: CommandObject) -> None:
+    if not message.from_user:
+        return
+    try:
+        page = max(0, int((command.args or "1").strip()) - 1)
+    except ValueError:
+        page = 0
+    with session_scope() as db:
+        player, _ = get_or_create_player(db, message.from_user.id, message.from_user.username, message.from_user.first_name)
+        payload = album_payload(db, player, page)
+    pet = payload.get("pet")
+    await answer_with_pet_media(message, render_album(payload), pet, reply_markup=album_keyboard(payload["page"], payload["total"], pet["id"] if pet else None))
+
+
+@router.message(Command("open"))
+async def cmd_open(message: Message, command: CommandObject) -> None:
+    if not message.from_user:
+        return
+    capsule_type = (command.args or "daily").strip().lower()
+    if capsule_type in {"обычная", "normal"}:
+        capsule_type = "common"
+    if capsule_type in {"редкая"}:
+        capsule_type = "rare"
+    if capsule_type in {"эпическая"}:
+        capsule_type = "epic"
+    if capsule_type in {"легендарная"}:
+        capsule_type = "legendary"
+    with session_scope() as db:
+        player, _ = get_or_create_player(db, message.from_user.id, message.from_user.username, message.from_user.first_name)
+        ok, text, pet = open_capsule(db, player, capsule_type=capsule_type)
         payload = pet_payload(pet) if pet else None
     if ok and payload:
-        await answer_with_pet_media(message, render_open_card(payload), payload, reply_markup=pet_keyboard(payload["id"]))
+        await answer_with_pet_media(message, text, payload, reply_markup=pet_keyboard(payload["id"]))
         return
-    await message.answer(text, reply_markup=main_keyboard())
+    await message.answer(text, reply_markup=capsule_keyboard())
+
 
 
 @router.message(Command("my"))
@@ -415,12 +550,67 @@ async def cb_open(callback: CallbackQuery) -> None:
     if callback.from_user and isinstance(callback.message, Message):
         with session_scope() as db:
             player, _ = get_or_create_player(db, callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-            ok, text, pet = open_capsule(db, player)
+            ok, text, pet = open_capsule(db, player, capsule_type="daily")
             payload = pet_payload(pet) if pet else None
         if ok and payload:
-            await answer_with_pet_media(callback.message, render_open_card(payload), payload, reply_markup=pet_keyboard(payload["id"]))
+            await answer_with_pet_media(callback.message, text, payload, reply_markup=pet_keyboard(payload["id"]))
             return
         await callback.message.answer(text, reply_markup=main_keyboard())
+
+
+@router.callback_query(F.data.startswith("cap:open:"))
+async def cb_open_typed(callback: CallbackQuery) -> None:
+    await callback.answer("Открываем…")
+    if callback.from_user and isinstance(callback.message, Message) and callback.data:
+        capsule_type = callback.data.split(":")[-1]
+        with session_scope() as db:
+            player, _ = get_or_create_player(db, callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+            ok, text, pet = open_capsule(db, player, capsule_type=capsule_type)
+            payload = pet_payload(pet) if pet else None
+        if ok and payload:
+            await answer_with_pet_media(callback.message, text, payload, reply_markup=pet_keyboard(payload["id"]))
+            return
+        await callback.message.answer(text, reply_markup=capsule_keyboard())
+
+
+@router.callback_query(F.data == "cap:shop")
+async def cb_shop(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if callback.from_user and isinstance(callback.message, Message):
+        with session_scope() as db:
+            player, _ = get_or_create_player(db, callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+            payload = shop_payload(player)
+        await callback.message.answer(render_shop(payload), reply_markup=shop_keyboard())
+
+
+@router.callback_query(F.data.startswith("cap:album:"))
+async def cb_album(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if callback.from_user and isinstance(callback.message, Message) and callback.data:
+        try:
+            page = int(callback.data.split(":")[-1])
+        except ValueError:
+            page = 0
+        with session_scope() as db:
+            player, _ = get_or_create_player(db, callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+            payload = album_payload(db, player, page)
+        pet = payload.get("pet")
+        await answer_with_pet_media(callback.message, render_album(payload), pet, reply_markup=album_keyboard(payload["page"], payload["total"], pet["id"] if pet else None))
+
+
+@router.callback_query(F.data.startswith("cap:setfav:"))
+async def cb_set_fav(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if callback.from_user and isinstance(callback.message, Message) and callback.data:
+        try:
+            pet_id = int(callback.data.split(":")[-1])
+        except ValueError:
+            return
+        with session_scope() as db:
+            player, _ = get_or_create_player(db, callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+            ok, text = set_favorite(db, player, pet_id)
+        await callback.message.answer(("✅ " if ok else "⛔ ") + h(text), reply_markup=main_keyboard())
+
 
 
 @router.callback_query(F.data == "cap:my")

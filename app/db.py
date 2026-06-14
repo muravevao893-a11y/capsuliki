@@ -45,6 +45,16 @@ if settings.is_sqlite:
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False, future=True)
 
+def _add_column_if_missing(table: str, column: str, ddl: str) -> None:
+    inspector = inspect(engine)
+    if table not in inspector.get_table_names():
+        return
+    existing = {item["name"] for item in inspector.get_columns(table)}
+    if column in existing:
+        return
+    with engine.begin() as conn:
+        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {ddl}"))
+
 
 def _create_index_if_missing(name: str, ddl: str) -> None:
     with engine.begin() as conn:
@@ -59,6 +69,7 @@ def run_light_migrations() -> None:
     inspector = inspect(engine)
     if "players" not in inspector.get_table_names():
         return
+    _add_column_if_missing("players", "capsule_dust", "capsule_dust INTEGER NOT NULL DEFAULT 0")
     _create_index_if_missing("ix_players_tg", "CREATE INDEX IF NOT EXISTS ix_players_tg ON players (telegram_user_id)")
     _create_index_if_missing("ix_pets_owner", "CREATE INDEX IF NOT EXISTS ix_pets_owner ON pets (owner_player_id)")
     _create_index_if_missing("ix_events_chat", "CREATE INDEX IF NOT EXISTS ix_group_events_chat ON group_events (chat_id, status)")

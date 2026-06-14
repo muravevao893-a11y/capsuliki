@@ -44,6 +44,7 @@ class Player(Base):
 
     coins: Mapped[int] = mapped_column(Integer, default=120, nullable=False)
     crystals: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    capsule_dust: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     xp: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     level: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     daily_streak: Mapped[int] = mapped_column(Integer, default=0, nullable=False)

@@ -22,6 +22,50 @@ RARITY_META: dict[str, dict[str, Any]] = {
     Rarity.MYTHIC.value: {"name": "мифический", "emoji": "🔴", "weight": 2, "xp": 180},
 }
 
+RARITY_ORDER = ["common", "uncommon", "rare", "epic", "legendary", "mythic"]
+
+CAPSULE_TYPES: dict[str, dict[str, Any]] = {
+    "daily": {
+        "name": "🎁 Ежедневная капсула",
+        "cost": None,
+        "weights": {"common": 560, "uncommon": 260, "rare": 120, "epic": 45, "legendary": 13, "mythic": 2},
+        "description": "бесплатная капсула раз в 20 часов",
+    },
+    "common": {
+        "name": "⚪ Обычная капсула",
+        "cost": {"coins": 100},
+        "weights": {"common": 640, "uncommon": 250, "rare": 85, "epic": 22, "legendary": 3, "mythic": 0},
+        "description": "дешёвая капсула для добора коллекции",
+    },
+    "rare": {
+        "name": "🔵 Редкая капсула",
+        "cost": {"crystals": 15},
+        "weights": {"common": 0, "uncommon": 0, "rare": 730, "epic": 220, "legendary": 45, "mythic": 5},
+        "description": "гарантирует редкого или выше",
+    },
+    "epic": {
+        "name": "🟣 Эпическая капсула",
+        "cost": {"crystals": 45},
+        "weights": {"common": 0, "uncommon": 0, "rare": 0, "epic": 820, "legendary": 160, "mythic": 20},
+        "description": "гарантирует эпического или выше",
+    },
+    "legendary": {
+        "name": "🟡 Легендарная капсула",
+        "cost": {"dust": 600},
+        "weights": {"common": 0, "uncommon": 0, "rare": 0, "epic": 0, "legendary": 930, "mythic": 70},
+        "description": "легендарная капсула за пыль дубликатов",
+    },
+}
+
+DUPLICATE_DUST: dict[str, int] = {
+    "common": 8,
+    "uncommon": 14,
+    "rare": 28,
+    "epic": 70,
+    "legendary": 180,
+    "mythic": 500,
+}
+
 SPECIES: list[dict[str, Any]] = [
     {"key": "murkos", "emoji": "🦊", "name": "Сапфирис", "element": "небо", "rarity": "rare", "image": "pet1", "skill": "чаще приносит кристаллы из небесных мест", "chars": ["сияющий", "быстрый", "любопытный"]},
     {"key": "zhabkin", "emoji": "🐢", "name": "Листопанцирь", "element": "лес", "rarity": "common", "image": "pet2", "skill": "лучше ищет монеты в спокойных экспедициях", "chars": ["мудрый", "добрый", "неторопливый"]},
@@ -98,9 +142,29 @@ def rarity_name(rarity: str) -> str:
     return f"{meta['emoji']} {meta['name']}"
 
 
-def choose_rarity() -> str:
+def choose_rarity(capsule_type: str = "daily", player: Player | None = None) -> str:
+    capsule = CAPSULE_TYPES.get(capsule_type, CAPSULE_TYPES["daily"])
+    weights_map = dict(capsule["weights"])
+
+    # Pity-система для ежедневной капсулы: игрок не должен слишком долго видеть только мусор.
+    if capsule_type == "daily" and player is not None:
+        next_open = int(player.capsules_opened or 0) + 1
+        min_rarity = None
+        if next_open % 80 == 0:
+            min_rarity = "epic"
+        elif next_open % 30 == 0:
+            min_rarity = "rare"
+        elif next_open % 10 == 0:
+            min_rarity = "uncommon"
+        if min_rarity:
+            min_index = RARITY_ORDER.index(min_rarity)
+            for rarity in RARITY_ORDER[:min_index]:
+                weights_map[rarity] = 0
+
     values = list(RARITY_META.keys())
-    weights = [RARITY_META[item]["weight"] for item in values]
+    weights = [int(weights_map.get(item, RARITY_META[item]["weight"])) for item in values]
+    if sum(weights) <= 0:
+        weights = [RARITY_META[item]["weight"] for item in values]
     return random.choices(values, weights=weights, k=1)[0]
 
 
@@ -115,6 +179,98 @@ def choose_species(rarity: str | None = None) -> dict[str, Any]:
 
 def _pet_level_from_xp(xp: int) -> int:
     return max(1, min(100, int((xp / 80) ** 0.5) + 1))
+
+
+
+def capsule_cost_text(capsule_type: str) -> str:
+    capsule = CAPSULE_TYPES.get(capsule_type, CAPSULE_TYPES["daily"])
+    cost = capsule.get("cost")
+    if not cost:
+        return "бесплатно"
+    parts = []
+    if cost.get("coins"):
+        parts.append(f"{cost['coins']} монет")
+    if cost.get("crystals"):
+        parts.append(f"{cost['crystals']} кристаллов")
+    if cost.get("dust"):
+        parts.append(f"{cost['dust']} пыли")
+    return ", ".join(parts) or "бесплатно"
+
+
+def can_pay_capsule(player: Player, capsule_type: str) -> tuple[bool, str]:
+    capsule = CAPSULE_TYPES.get(capsule_type)
+    if not capsule:
+        return False, "Такой капсулы нет."
+    cost = capsule.get("cost")
+    if not cost:
+        return True, ""
+    if player.coins < int(cost.get("coins", 0)):
+        return False, f"Нужно {cost['coins']} монет. У тебя {player.coins}."
+    if player.crystals < int(cost.get("crystals", 0)):
+        return False, f"Нужно {cost['crystals']} кристаллов. У тебя {player.crystals}."
+    if int(getattr(player, "capsule_dust", 0) or 0) < int(cost.get("dust", 0)):
+        return False, f"Нужно {cost['dust']} пыли капсул. У тебя {getattr(player, 'capsule_dust', 0) or 0}."
+    return True, ""
+
+
+def pay_capsule(player: Player, capsule_type: str) -> None:
+    cost = CAPSULE_TYPES.get(capsule_type, {}).get("cost")
+    if not cost:
+        return
+    player.coins -= int(cost.get("coins", 0))
+    player.crystals -= int(cost.get("crystals", 0))
+    player.capsule_dust = int(getattr(player, "capsule_dust", 0) or 0) - int(cost.get("dust", 0))
+
+
+def capsule_drop_chance(capsule_type: str, rarity: str) -> str:
+    weights = CAPSULE_TYPES.get(capsule_type, CAPSULE_TYPES["daily"])["weights"]
+    total = sum(int(v) for v in weights.values())
+    if total <= 0:
+        return "?"
+    value = int(weights.get(rarity, 0))
+    if value <= 0:
+        return "pity"
+    chance = value / total * 100
+    if chance >= 10:
+        return f"{chance:.0f}%"
+    if chance >= 1:
+        return f"{chance:.1f}%"
+    return f"{chance:.2f}%"
+
+
+def player_has_species(db: Session, player: Player, species_key: str) -> bool:
+    return bool(db.scalar(select(Pet.id).where(Pet.owner_player_id == player.id, Pet.species_key == species_key).limit(1)))
+
+
+def shop_payload(player: Player) -> dict[str, Any]:
+    return {
+        "coins": player.coins,
+        "crystals": player.crystals,
+        "dust": int(getattr(player, "capsule_dust", 0) or 0),
+        "capsules": [
+            {
+                "key": key,
+                "name": spec["name"],
+                "cost": capsule_cost_text(key),
+                "description": spec["description"],
+            }
+            for key, spec in CAPSULE_TYPES.items()
+            if key != "daily"
+        ],
+    }
+
+
+def album_payload(db: Session, player: Player, page: int = 0) -> dict[str, Any]:
+    pets = db.scalars(select(Pet).where(Pet.owner_player_id == player.id).order_by(desc(Pet.obtained_at))).all()
+    total = len(pets)
+    if total == 0:
+        return {"total": 0, "page": 0, "pet": None}
+    page = max(0, min(page, total - 1))
+    return {
+        "total": total,
+        "page": page,
+        "pet": pet_payload(pets[page]),
+    }
 
 
 def create_pet_from_species(db: Session, owner: Player, species: dict[str, Any]) -> Pet:
@@ -138,32 +294,66 @@ def create_pet_from_species(db: Session, owner: Player, species: dict[str, Any])
     return pet
 
 
-def open_capsule(db: Session, player: Player, force: bool = False) -> tuple[bool, str, Pet | None]:
+def open_capsule(db: Session, player: Player, force: bool = False, capsule_type: str = "daily") -> tuple[bool, str, Pet | None]:
+    if capsule_type not in CAPSULE_TYPES:
+        return False, "Такой капсулы нет.", None
+
     now = utcnow()
     last = aware(player.last_open_at)
-    if last and not force and now < last + timedelta(hours=20):
+    if capsule_type == "daily" and last and not force and now < last + timedelta(hours=20):
         left = int(((last + timedelta(hours=20)) - now).total_seconds() // 3600) + 1
         return False, f"Капсула ещё заряжается. Осталось примерно {left} ч.", None
 
-    rarity = choose_rarity()
+    ok, reason = can_pay_capsule(player, capsule_type)
+    if not ok and not force:
+        return False, reason, None
+
+    if not force:
+        pay_capsule(player, capsule_type)
+
+    rarity = choose_rarity(capsule_type, player)
     species = choose_species(rarity)
+    duplicate = player_has_species(db, player, species["key"])
     pet = create_pet_from_species(db, player, species)
+
     player.capsules_opened += 1
-    player.last_open_at = now
-    player.daily_streak += 1
+    if capsule_type == "daily":
+        player.last_open_at = now
+        player.daily_streak += 1
+
     xp = int(RARITY_META[rarity]["xp"])
     player.xp += xp
     player.coins += 15 + xp
     player.level = max(player.level, _pet_level_from_xp(player.xp))
+
+    duplicate_text = ""
+    if duplicate:
+        dust = int(DUPLICATE_DUST.get(rarity, 8))
+        player.capsule_dust = int(getattr(player, "capsule_dust", 0) or 0) + dust
+        pet.xp += dust
+        pet.power += max(1, dust // 10)
+        duplicate_text = f"\n\n🔁 Дубликат! Питомец усилен, получено <b>{dust}</b> пыли капсул."
+
+    chance = capsule_drop_chance(capsule_type, rarity)
+    capsule_name = CAPSULE_TYPES[capsule_type]["name"]
     log(db, player.id, None, "open_capsule", f"{hname(player)} получил {pet.emoji} {pet.name}")
     db.flush()
+    headline = {
+        "mythic": "🔴 МИФИЧЕСКИЙ ПИТОМЕЦ!",
+        "legendary": "🟡 ЛЕГЕНДАРНЫЙ ПИТОМЕЦ!",
+        "epic": "🟣 ЭПИЧЕСКИЙ ПИТОМЕЦ!",
+    }.get(rarity, "🎁 Капсула открыта!")
     text = (
-        f"🎁 Капсула открыта!\n\n"
-        f"Ты получил: <b>{pet.emoji} {pet.name}</b>\n"
+        f"{headline}\n\n"
+        f"Капсула: <b>{capsule_name}</b>\n"
+        f"Выпал: <b>{pet.emoji} {pet.name}</b>\n"
         f"Редкость: <b>{rarity_name(pet.rarity)}</b>\n"
-        f"Характер: <b>{pet.character}</b>\n"
+        f"Шанс: <b>{chance}</b>\n"
         f"Стихия: <b>{pet.element}</b>\n"
+        f"Характер: <b>{pet.character}</b>\n"
+        f"Сила: <b>{pet.power}</b>\n"
         f"Навык: <b>{pet.skill}</b>"
+        f"{duplicate_text}"
     )
     return True, text, pet
 
@@ -179,6 +369,7 @@ def collection_payload(db: Session, player: Player) -> dict[str, Any]:
             "name": hname(player),
             "coins": player.coins,
             "crystals": player.crystals,
+            "dust": int(getattr(player, "capsule_dust", 0) or 0),
             "level": player.level,
             "xp": player.xp,
             "streak": player.daily_streak,
