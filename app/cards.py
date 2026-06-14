@@ -120,6 +120,16 @@ def _draw_center(draw: ImageDraw.ImageDraw, xy: tuple[int, int], text: str, font
     draw.text(xy, _fit_text(draw, text, font, max_width), fill=fill, font=font, anchor="mm")
 
 
+def _initials(text: str) -> str:
+    clean = _strip_unrenderable_symbols(text)
+    words = [part for part in clean.replace("-", " ").split() if part]
+    if not words:
+        return "?"
+    if len(words) == 1:
+        return words[0][:2].upper()
+    return "".join(word[0] for word in words[:2]).upper()
+
+
 def build_pet_card(
     pet: dict[str, Any],
     image_path: str | None,
@@ -128,7 +138,7 @@ def build_pet_card(
     chance: str | None = None,
 ) -> str:
     # Add font version to cache key so old broken cards are not reused after update.
-    key = f"v112-fontfix-{pet.get('id')}-{pet.get('xp')}-{pet.get('power')}-{title}-{owner_name}-{chance}-{image_path}"
+    key = f"v120-content-{pet.get('id')}-{pet.get('xp')}-{pet.get('power')}-{title}-{owner_name}-{chance}-{image_path}"
     out = CARD_DIR / (hashlib.sha1(key.encode("utf-8")).hexdigest() + ".png")
     if out.exists():
         return str(out)
@@ -171,9 +181,11 @@ def build_pet_card(
             ImageDraw.Draw(mask).ellipse((0, 0, 520, 520), fill=255)
             img.paste(pet_img, (190, 165), mask)
         except Exception:
-            draw.text((450, 410), "PET", font=_font(96, True), fill=accent, anchor="mm")
+            draw.text((450, 390), _initials(str(pet.get("name") or pet.get("base_name") or "PET")), font=_font(96, True), fill=accent, anchor="mm")
+            draw.text((450, 465), _fit_text(draw, str(pet.get("element") or ""), _font(28), 320), font=_font(28), fill=accent, anchor="mm")
     else:
-        draw.text((450, 410), "PET", font=_font(96, True), fill=accent, anchor="mm")
+        draw.text((450, 390), _initials(str(pet.get("name") or pet.get("base_name") or "PET")), font=_font(96, True), fill=accent, anchor="mm")
+        draw.text((450, 465), _fit_text(draw, str(pet.get("element") or ""), _font(28), 320), font=_font(28), fill=accent, anchor="mm")
 
     # Lower panel moved slightly down; less text, more readable.
     panel = (70, 650, 830, 835)
