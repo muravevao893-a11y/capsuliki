@@ -1,379 +1,243 @@
-# Капсулики Bot v1.2 — больше питомцев
+# Капсулики Bot v1.3.1 — PostgreSQL + Redis
 
-**Капсулики** — Telegram-бот-игра про капсулы, коллекцию питомцев, уход, экспедиции, обмены и групповые события.
+Telegram-бот-игра про капсулы, питомцев, коллекции, уход, экспедиции, обмены, донат через Telegram Stars и групповые события.
 
-В этой версии есть поддержка **10 картинок питомцев**. Когда игрок открывает капсулу или ловит питомца в групповом событии, бот отправляет **сообщение с картинкой питомца**.
+## Что сделано в v1.3.1
 
-## Что нового в v1.2
+- PostgreSQL теперь основной режим для локального запуска и Railway.
+- `DATABASE_URL` автоматически нормализуется:
+  - `postgres://...` → `postgresql+psycopg://...`
+  - `postgresql://...` → `postgresql+psycopg://...`
+  - это убирает падение из-за отсутствующего `psycopg2`.
+- Добавлены настройки пула БД:
+  - `DB_POOL_SIZE`
+  - `DB_MAX_OVERFLOW`
+  - `DB_POOL_RECYCLE_SECONDS`
+  - `DB_ECHO`
+- `/api/health`, `/api/ready` и `/admin_health` показывают тип БД и драйвер.
+- Добавлен `scripts/check_database.py` для быстрой проверки подключения и миграций.
+- `.env.example` теперь настроен под локальный PostgreSQL + Redis из `docker-compose.yml`.
+- `.env.sqlite.example` оставлен только как запасной режим для простого локального теста.
+- Redis-слой из v1.3 сохранён: lock-и, rate-limit, защита от дублей и два события в группе.
 
-- расширен пул питомцев с 10 до 36;
-- добавлены новые питомцы всех редкостей: common, uncommon, rare, epic, legendary, mythic;
-- добавлены новые стихии: молния, туман, дождь, янтарь, гроза, рубин, плазма, астрал, время, эфир и другие;
-- добавлены новые навыки и характеры;
-- новые питомцы используют слоты изображений `pet11.png` ... `pet36.png`;
-- если картинки нет, PNG-карточка теперь показывает аккуратную буквенную эмблему и стихию, а не просто `PET`;
-- добавлены тесты на уникальность ключей питомцев и участие новых питомцев в открытии капсул.
+## Что было сделано в v1.3
 
-## Что нового в v1.1.2
+- Добавлен Redis-слой `app/redis_store.py`.
+- Inline-кнопки сначала лимитятся через Redis, а при недоступном Redis откатываются на DB-лимитер.
+- Добавлены distributed locks, чтобы при нескольких процессах/рестартах не плодились дубли событий.
+- В одной группе может быть до двух активных событий: `catch` + `boss`.
+- События одного типа не дублируются.
+- Ручные команды `/spawn` и `/boss` защищены lock-ами.
+- Клики по ловле и удару босса защищены lock-ом на конкретное событие.
+- `docker-compose.yml` поднимает PostgreSQL + Redis.
 
-- усилен лимит ежедневной капсулы: обычный `/open` больше не обходит лимит даже у админа;
-- разделены логи открытия:
-  - `open_daily` — ежедневная капсула;
-  - `open_paid` — платные капсулы;
-  - `open_capsule` — общий лог для аналитики;
-- добавлена команда `/limits`, чтобы игрок видел свои лимиты на сегодня;
-- добавлена отдельная админ-команда `/admin_force_open USER_ID [capsule_type]` для тестового открытия с `force=True`;
-- исправлен внутренний баг поля `pet.personality` → `pet.character` в тексте открытия;
-- добавлены тесты на повторное открытие daily и отдельный paid-limit.
-
-## Что нового в v1.1.1
-
-- исправлен текст на PNG-карточках питомцев;
-- в Dockerfile добавлены `fontconfig` и `fonts-dejavu-core`;
-- `cards.py` теперь лучше ищет шрифты с кириллицей;
-- emoji удаляются из текста на карточке, чтобы не было квадратов;
-- добавлен fallback: если кириллический шрифт всё равно не найден, текст транслитерируется вместо квадратов;
-- сброшен cache key карточек, чтобы старые битые карточки не переиспользовались.
-
-## Что нового в v1.1
-
-- улучшен `/start`: понятный быстрый старт без перегруза;
-- добавлен `/rules` с правилами игры;
-- добавлен runtime config без правки `.env`:
-  - `/admin_config`
-  - `/admin_set_config KEY VALUE`
-- теперь лимиты и maintenance можно менять прямо из бота;
-- runtime config влияет на:
-  - `maintenance_mode`
-  - `free_open_daily_limit`
-  - `paid_open_daily_limit`
-  - `care_daily_limit`
-  - `expedition_daily_limit`
-  - `group_catch_daily_limit`
-  - `group_event_interval_minutes`
-- исправлен баг: лимит экспедиций теперь реально применяется в `start_expedition`;
-- донат в группе теперь не пытается открывать invoice прямо в группе, а отправляет игрока в личку;
-- pre-checkout теперь проверяет бан и принадлежность платежа аккаунту;
-- админ-уведомления о донатах: `ADMIN_NOTIFY_PAYMENTS=true`;
-- опциональные уведомления об ошибках: `ADMIN_NOTIFY_ERRORS=true`;
-- добавлена таблица `app_config`;
-- schema version обновлена до `1.1`.
-
-## Что нового в v1.0
-
-- бан-система:
-  - `/admin_ban USER_ID причина`
-  - `/admin_unban USER_ID`
-  - `/admin_banned`
-- maintenance mode через `MAINTENANCE_MODE=true`;
-- антиабуз-лимиты:
-  - `FREE_OPEN_DAILY_LIMIT`
-  - `PAID_OPEN_DAILY_LIMIT`
-  - `CARE_DAILY_LIMIT`
-  - `EXPEDITION_DAILY_LIMIT`
-  - `GROUP_CATCH_DAILY_LIMIT`
-- забаненные игроки не могут открывать капсулы, ловить события, запускать экспедиции, донатить игровые награды и использовать рефералку;
-- `/admin_health` — диагностика;
-- `/admin_last_actions` — последние действия;
-- `/admin_clear_errors` — очистка ошибок;
-- `/admin_backup` — JSON-бэкап важных таблиц;
-- добавлена таблица `schema_versions` и запись версии схемы `1.0`;
-- дополнительные поля игроков: `is_banned`, `ban_reason`, `banned_at`.
-
-## Что нового в v0.9
-
-- `/admin` — главный админ-центр с кнопками;
-- `/admin_users` — последние игроки;
-- `/admin_user USER_ID` — детальная карточка игрока;
-- `/admin_revenue` — Stars за 24ч / 7д / 30д / всего;
-- `/admin_products` — популярность донат-товаров;
-- `/admin_top_donors` — топ донатеров;
-- `/admin_referrals` — топ по рефералам;
-- `/admin_economy` — экономика игры: монеты, кристаллы, пыль, питомцы;
-- расширенный dashboard: игроки, группы, активность, оплаты, ошибки, рефералы;
-- inline-кнопки для быстрого переключения разделов админки.
-
-## Что нового в v0.8
-
-- `/donate` и `/stars` — донат-магазин через Telegram Stars;
-- `/payments` — история покупок игрока;
-- `/admin_payments` — статистика оплат для админа;
-- инвойсы через Telegram Stars: currency `XTR`, provider token пустой;
-- pre-checkout проверка товара и суммы;
-- обработка successful_payment;
-- выдача наград после оплаты: монеты, кристаллы, пыль и очки сезона;
-- защита от повторной обработки одного платежа;
-- таблица `star_purchases` для истории оплат;
-- товары доната: 15⭐, 35⭐, 75⭐, 149⭐.
-
-## Что нового в v0.7
-
-- `/season` — текущий сезон игрока;
-- `/season_top` — топ сезона;
-- `/ref` — реферальная ссылка игрока;
-- поддержка deep-link `/start ref_PLAYER_ID`;
-- бонус новому игроку и пригласившему;
-- сезонные очки за капсулы, экспедиции, поимку в группе, daily/quests;
-- админ-выдача ресурсов:
-  - `/admin_give_coins USER_ID 1000`
-  - `/admin_give_crystals USER_ID 50`
-  - `/admin_give_dust USER_ID 200`
-  - `/admin_give_pet USER_ID pet6`
-- команды сезона и рефералки добавлены в Telegram command list.
-
-## Что нового в v0.6
-
-- PNG-карточки выпадения с рамкой по редкости;
-- карточка генерируется автоматически из `pet1.png` … `pet10.png`;
-- `/quests` — ежедневные задания;
-- кнопка “Забрать награды” для выполненных заданий;
-- `/daily` — ежедневная награда за серию;
-- меню стало чище: меньше кнопок на одном сообщении;
-- уход за питомцем вынесен в отдельное маленькое меню;
-- добавлен Pillow для генерации карточек.
-
-## Что нового в v0.5
-
-- зарегистрированы команды BotFather через `set_my_commands`, чтобы в подсказках Telegram были `/open@CapsulikiBot`, `/profile@CapsulikiBot` и остальные;
-- clean-режим сообщений: бот удаляет своё старое меню/ответ и отправляет новое;
-- в группах бот пытается удалять команду пользователя после ответа;
-- усилена защита владения питомцами: чужой игрок не может кормить, тренировать, назначать любимчиком или трогать питомца другого игрока;
-- `/pets` — список твоих питомцев с ID;
-- `/petinfo ID` — карточка питомца с владельцем;
-- кнопки ухода теперь не ломают экран, если нажал чужой игрок;
-- добавлены тесты на защиту владения.
-
-## Что нового в v0.4
-
-- автоматический реестр групп;
-- бот запоминает группы, игроков и активность;
-- групповой автоспавн редких капсуликов;
-- групповой автоспавн босса;
-- антиспам кнопок: быстрые повторные клики режутся;
-- один игрок = одна попытка поймать капсулика за событие;
-- `/profile` — нормальный профиль игрока;
-- `/admin_groups` — список групп;
-- `/admin_errors` — последние ошибки;
-- глобальный обработчик ошибок aiogram;
-- `/admin_stats` показывает группы и ошибки.
-
-## Что нового в v0.3
-
-- `/album` — альбом коллекции с кнопками листания;
-- `/capsules` — список типов капсул;
-- `/shop` — магазин капсул;
-- `/open rare`, `/open epic`, `/open legendary`;
-- красивые сообщения выпадения с шансом, силой и редкостью;
-- pity-система для ежедневной капсулы;
-- дубликаты дают пыль капсул и усиливают питомца;
-- пыль капсул можно тратить на легендарную капсулу;
-- меню обновлено под альбом и магазин.
-
----
-
-## Что уже умеет бот
-
-### Личное
+## Структура
 
 ```text
-/start
-/menu
-/open
-/open rare
-/capsules
-/shop
-/album
-/profile
-/quests
-/daily
-/season
-/season_top
-/ref
-/donate
-/stars
-/payments
-/pets
-/petinfo PET_ID
-/my
-/pet
-/setfav PET_ID
-/expedition
-/finish
-/top
+app/
+  bot.py             # Telegram bot handlers
+  game.py            # игровая логика
+  db.py              # SQLAlchemy engine/session/init/migrations
+  config.py          # env-настройки + нормализация DATABASE_URL
+  redis_store.py     # Redis locks/rate-limit helpers
+  models.py          # SQLAlchemy models
+  web.py             # /api/health и /api/ready
+scripts/
+  check_database.py  # проверка подключения к БД
+static/
+  index.html         # простая web-заглушка
 ```
 
-### Обмен
+## Локальный запуск через PostgreSQL + Redis
 
-```text
-/trade @username PET_ID
-/accepttrade ID
-```
-
-### Группы
-
-```text
-/spawn  # админ проекта, спавн редкого капсулика
-/boss   # админ проекта, спавн босса
-```
-
-### Админ
-
-```text
-/admin_stats
-/admin_groups
-/admin_errors
-```
-
----
-
-## Куда класть картинки питомцев
-
-Папка внутри проекта:
-
-```text
-app/assets/pets/
-```
-
-Бот ищет файлы с именами:
-
-```text
-pet1.png
-pet2.png
-pet3.png
-pet4.png
-pet5.png
-pet6.png
-pet7.png
-pet8.png
-pet9.png
-pet10.png
-```
-
-Поддерживаются и такие форматы:
-
-```text
-.png
-.jpg
-.jpeg
-.webp
-```
-
-То есть можно, например, положить `pet1.png`, `pet2.png`, `pet3.webp` — бот найдёт их сам.
-
----
-
-## Какой файл какому питомцу соответствует
-
-| Файл | Питомец | Редкость |
-|---|---|---|
-| pet1 | Сапфирис | rare |
-| pet2 | Листопанцирь | common |
-| pet3 | Розалотль | uncommon |
-| pet4 | Неонорик | uncommon |
-| pet5 | Полярикс | rare |
-| pet6 | Пиродрак | legendary |
-| pet7 | Лунорог | epic |
-| pet8 | Аметис | epic |
-| pet9 | Солярис | legendary |
-| pet10 | Созвезай | mythic |
-
----
-
-## Что именно сделано
-
-- каждому из 10 питомцев назначен свой файл изображения;
-- при `/open` бот присылает **картинку питомца + подпись**;
-- при ловле питомца в групповом событии бот тоже присылает **картинку + подпись**;
-- при `/pet` и кнопке **Любимчик** бот показывает карточку питомца тоже с его картинкой;
-- если файла нет, бот не падает, а просто отправляет обычный текст.
-
----
-
-## Запуск локально Windows PowerShell
+Из корня проекта:
 
 ```powershell
-cd capsuliki_bot
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 copy .env.example .env
+docker compose up -d postgres redis
+python scripts/check_database.py
 python -m app.main
 ```
 
-В `.env` укажи минимум:
+На Linux/macOS:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+docker compose up -d postgres redis
+python scripts/check_database.py
+python -m app.main
+```
+
+Минимальный `.env` для локального запуска:
 
 ```env
-BOT_TOKEN=токен_от_BotFather
+BOT_TOKEN=твой_токен_бота
 ADMIN_IDS=твой_telegram_id
+DATABASE_URL=postgresql+psycopg://capsuliki:capsuliki@localhost:5432/capsuliki
+REDIS_URL=redis://localhost:6379/0
+RUN_BOT_POLLING=true
+GROUP_EVENTS_PER_GROUP=2
 ```
 
-Если хочешь запуск только API без Telegram polling:
-
-```env
-RUN_BOT_POLLING=false
-```
-
-Проверка health:
+Проверка:
 
 ```text
 http://localhost:8080/api/health
 http://localhost:8080/api/ready
 ```
 
----
+## Railway: как правильно связать Web + Postgres + Redis
 
-## PostgreSQL локально
+На скрине у тебя уже есть три сервиса: `web`, `Postgres`, `Redis`. Теперь главное — в **web service** прописать переменные, которые ссылаются на соседние сервисы.
 
-```powershell
-docker compose up -d postgres
+В Railway открой:
+
+```text
+web → Variables
 ```
 
-И в `.env`:
-
-```env
-DATABASE_URL=postgresql+psycopg://capsuliki:capsuliki@localhost:5432/capsuliki
-```
-
----
-
-## Railway
-
-Env для Railway:
+Добавь или проверь:
 
 ```env
 BOT_TOKEN=токен_от_BotFather
 ADMIN_IDS=твой_telegram_id
 DATABASE_URL=${{Postgres.DATABASE_URL}}
+REDIS_URL=${{Redis.REDIS_URL}}
 RUN_BOT_POLLING=true
+HOST=0.0.0.0
+PORT=${{PORT}}
 APP_SECRET=любой_длинный_секрет_32+_символа
+REDIS_ENABLED=true
+REDIS_REQUIRED=false
 ENABLE_GROUP_EVENTS=true
-```
-
----
-
-## Проверка проекта
-
-```powershell
-python -m compileall app tests
-python -m unittest discover -s tests -v
-```
-
----
-
-## Что можно сделать дальше
-
-- PNG-карточки редкости с рамками;
-- красивые PNG-карточки редкости с рамками;
-- Telegram Stars для премиум-капсул;
-- сезонные коллекции.
-
-## Telegram Stars
-
-В `.env`:
-
-```env
+GROUP_EVENTS_PER_GROUP=2
+GROUP_EVENT_BATCH_SIZE=10
+GROUP_EVENT_POLL_SECONDS=60
+GROUP_EVENT_LOCK_SECONDS=120
+GROUP_BOSS_INTERVAL_HOURS=24
 STARS_ENABLED=true
 STARS_CURRENCY=XTR
 ```
 
-Для Telegram Stars `provider_token` в коде оставлен пустым, валюта — `XTR`.
+Если твой сервис базы в Railway называется не `Postgres`, а например `postgres` или `Capsuliki DB`, то reference надо писать с его точным именем:
+
+```env
+DATABASE_URL=${{ТОЧНОЕ_ИМЯ_СЕРВИСА_БД.DATABASE_URL}}
+```
+
+То же самое с Redis:
+
+```env
+REDIS_URL=${{ТОЧНОЕ_ИМЯ_REDIS.REDIS_URL}}
+```
+
+После изменения variables нажми redeploy у `web`.
+
+## Как понять, что PostgreSQL реально подключился
+
+Открой:
+
+```text
+https://твой-web-домен.up.railway.app/api/health
+```
+
+Должно быть примерно так:
+
+```json
+{
+  "status": "ok",
+  "service": "capsuliki-bot",
+  "database": {
+    "kind": "postgres",
+    "driver": "postgresql+psycopg"
+  },
+  "redis": "ok"
+}
+```
+
+Потом открой:
+
+```text
+https://твой-web-домен.up.railway.app/api/ready
+```
+
+Там уже проверяется реальный `SELECT 1` в БД. Если `ready`, значит Postgres живой и доступен из приложения.
+
+В боте у админа также есть:
+
+```text
+/admin_health
+```
+
+## Важный момент про старую SQLite-базу
+
+Этот архив не переносит данные из старого `capsuliki.db` в PostgreSQL автоматически. Если у тебя уже были реальные игроки в SQLite и их надо сохранить, сначала надо сделать отдельную миграцию данных. Если игроков пока не жалко — просто деплой с PostgreSQL и таблицы создадутся сами.
+
+## Запуск только API без polling
+
+Для диагностики можно временно выключить Telegram polling:
+
+```env
+RUN_BOT_POLLING=false
+```
+
+Тогда web-сервис стартует, `/api/health` и `/api/ready` будут работать, но бот не будет читать апдейты Telegram.
+
+## Redis и два события
+
+Главная настройка:
+
+```env
+GROUP_EVENTS_PER_GROUP=2
+```
+
+Как работает:
+
+- в одной группе может быть активна ловля и босс одновременно;
+- две ловли сразу не создаются;
+- два босса сразу не создаются;
+- Redis защищает спавн и клики от дублей;
+- если Redis временно упал, бот продолжит работать в DB-only режиме;
+- если хочешь жёстко требовать Redis для готовности сервиса, поставь `REDIS_REQUIRED=true`.
+
+## Проверка проекта
+
+```powershell
+python -m compileall app scripts tests
+python -m unittest discover -s tests -v
+```
+
+## Частые проблемы
+
+### `/api/health` показывает `sqlite`
+
+Значит `DATABASE_URL` не попал в `web` service. Проверь именно `web → Variables`, а не variables внутри Postgres.
+
+### Ошибка `No module named psycopg2`
+
+В этой версии исправлено: обычные Railway URL автоматически переводятся на `postgresql+psycopg://`. Если ошибка осталась, значит на Railway задеплоен старый архив.
+
+### Redis показывает `disabled`
+
+Значит `REDIS_URL` пустой или не попал в `web` service.
+
+### Redis показывает `error`
+
+Переменная есть, но приложение не может подключиться. Проверь reference `REDIS_URL=${{Redis.REDIS_URL}}` и redeploy.
+
+### Бот не отвечает, но сайт живой
+
+Проверь:
+
+```env
+RUN_BOT_POLLING=true
+BOT_TOKEN=реальный_токен
+```
+
+И убедись, что этот же бот не запущен где-то ещё вторым polling-процессом. Telegram polling такого не любит, он начинает капризничать как принцесса на горошине.

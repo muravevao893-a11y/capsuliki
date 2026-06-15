@@ -4,6 +4,7 @@ import asyncio
 import html
 import logging
 import traceback
+from datetime import timedelta
 from typing import Any
 
 from aiogram import BaseMiddleware, Bot, Dispatcher, F, Router
@@ -15,12 +16,14 @@ from sqlalchemy import select
 
 from app.config import get_settings
 from app.db import session_scope
+from app.redis_store import acquire_redis_lock, close_redis, redis_configured, redis_ping, redis_rate_limited
 from app.game import (
     CAPSULE_TYPES,
     album_payload,
     shop_payload,
     EXPEDITIONS,
     accept_trade,
+    active_group_event,
     admin_errors_payload,
     button_rate_limited,
     group_chats_for_events,
@@ -71,9 +74,11 @@ from app.game import (
     expedition_payload,
     favorite_pet,
     finish_expedition,
+    expire_old_group_events,
     get_or_create_player,
     hit_boss,
     leaderboard,
+    last_group_event_at,
     open_capsule,
     pet_info_payload,
     pet_owner_name,
@@ -86,7 +91,7 @@ from app.game import (
     spawn_catch_event,
     start_expedition,
 )
-from app.models import GroupEvent, Pet, Player
+from app.models import GroupEvent, Pet, Player, utcnow
 from app.pet_media import find_pet_image
 from app.cards import build_pet_card
 
@@ -186,9 +191,16 @@ class CallbackThrottleMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         if isinstance(event, CallbackQuery) and event.from_user and isinstance(event.message, Message):
             try:
-                with session_scope() as db:
-                    player, _ = get_or_create_player(db, event.from_user.id, event.from_user.username, event.from_user.first_name)
-                    limited, left = button_rate_limited(db, event.message.chat.id, player, "callback", seconds=2)
+                redis_result = redis_rate_limited(
+                    f"cap:throttle:callback:{event.message.chat.id}:{event.from_user.id}",
+                    seconds=2,
+                )
+                if redis_result is not None:
+                    limited, left = redis_result
+                else:
+                    with session_scope() as db:
+                        player, _ = get_or_create_player(db, event.from_user.id, event.from_user.username, event.from_user.first_name)
+                        limited, left = button_rate_limited(db, event.message.chat.id, player, "callback", seconds=2)
                 if limited:
                     await event.answer(f"⏳ {left} сек.", show_alert=False)
                     return None
@@ -837,9 +849,12 @@ def render_admin_config(items: list[dict[str, Any]]) -> str:
 
 
 def render_admin_health(payload: dict[str, Any]) -> str:
+    redis_state = "disabled" if not redis_configured() else ("ok" if redis_ping() else "error")
     return (
         "🩺 <b>Health</b>\n\n"
-        f"Database: <b>{h(payload['database'])}</b>\n"
+        f"Database: <b>{h(payload['database'])}</b> · {h(payload.get('database_info', {}).get('kind', 'unknown'))}\n"
+        f"DB driver: <code>{h(payload.get('database_info', {}).get('driver', 'unknown'))}</code>\n"
+        f"Redis: <b>{redis_state}</b>\n"
         f"Maintenance: <b>{payload['maintenance']}</b>\n"
         f"Stars enabled: <b>{payload['stars_enabled']}</b>\n"
         f"Players: <b>{payload['players']}</b>\n"
@@ -1635,18 +1650,30 @@ async def cmd_spawn(message: Message) -> None:
     if not is_admin_user(message.from_user.id if message.from_user else None):
         await clean_answer(message, "Только админ проекта.")
         return
-    with session_scope() as db:
-        group = register_group_chat(db, message.chat.id, message.chat.title or "Чат")
-        event = spawn_catch_event(db, message.chat.id, message.chat.title or "Чат")
-        mark_group_event_sent(group)
-        data = __import__("json").loads(event.data_json)
-        species = data["species"]
-    await clean_answer(message, 
-        f"✨ <b>В чат залетел редкий капсулик!</b>\n\n"
-        f"{species['emoji']} <b>{h(species['name'])}</b>\n"
-        f"Кто успеет — попробует поймать.",
-        reply_markup=catch_keyboard(event.id),
-    )
+
+    lock = acquire_redis_lock(f"cap:event:spawn:{message.chat.id}:catch", ttl_seconds=30)
+    if lock and not lock.acquired:
+        await clean_answer(message, "⏳ Событие уже создаётся. Не тыкай как дятел по энтеру 😄")
+        return
+    try:
+        with session_scope() as db:
+            group = register_group_chat(db, message.chat.id, message.chat.title or "Чат")
+            event = active_group_event(db, message.chat.id, "catch")
+            if event is None:
+                event = spawn_catch_event(db, message.chat.id, message.chat.title or "Чат")
+                mark_group_event_sent(group)
+            data = __import__("json").loads(event.data_json or "{}")
+            species = data.get("species") or {"emoji": "✨", "name": "Капсулик"}
+        await clean_answer(
+            message,
+            f"✨ <b>В чат залетел редкий капсулик!</b>\n\n"
+            f"{species['emoji']} <b>{h(species['name'])}</b>\n"
+            f"Кто успеет — попробует поймать.",
+            reply_markup=catch_keyboard(event.id),
+        )
+    finally:
+        if lock:
+            lock.release()
 
 
 @router.message(Command("boss"))
@@ -1657,16 +1684,28 @@ async def cmd_boss(message: Message) -> None:
     if not is_admin_user(message.from_user.id if message.from_user else None):
         await clean_answer(message, "Только админ проекта.")
         return
-    with session_scope() as db:
-        group = register_group_chat(db, message.chat.id, message.chat.title or "Чат")
-        event = spawn_boss_event(db, message.chat.id, message.chat.title or "Чат")
-        mark_group_event_sent(group)
-        data = __import__("json").loads(event.data_json)
-        boss = data["boss"]
-    await clean_answer(message, 
-        f"🐲 <b>Босс недели появился!</b>\n\n{boss['emoji']} <b>{h(boss['name'])}</b>\nHP: <b>{boss['hp']}</b>",
-        reply_markup=boss_keyboard(event.id),
-    )
+
+    lock = acquire_redis_lock(f"cap:event:spawn:{message.chat.id}:boss", ttl_seconds=30)
+    if lock and not lock.acquired:
+        await clean_answer(message, "⏳ Босс уже призывается. Магия занята, подожди секунду 😄")
+        return
+    try:
+        with session_scope() as db:
+            group = register_group_chat(db, message.chat.id, message.chat.title or "Чат")
+            event = active_group_event(db, message.chat.id, "boss")
+            if event is None:
+                event = spawn_boss_event(db, message.chat.id, message.chat.title or "Чат")
+                mark_group_event_sent(group)
+            data = __import__("json").loads(event.data_json or "{}")
+            boss = data.get("boss") or {"emoji": "🐲", "name": "Босс", "hp": data.get("hp", 1)}
+        await clean_answer(
+            message,
+            f"🐲 <b>Босс появился!</b>\n\n{boss['emoji']} <b>{h(boss['name'])}</b>\nHP: <b>{data.get('hp', boss.get('hp', 1))}</b>",
+            reply_markup=boss_keyboard(event.id),
+        )
+    finally:
+        if lock:
+            lock.release()
 
 
 @router.message(Command("admin_stats"))
@@ -2015,15 +2054,23 @@ async def cb_catch(callback: CallbackQuery) -> None:
         await callback.answer("Не получилось.", show_alert=True)
         return
     event_id = int(callback.data.split(":")[-1])
-    with session_scope() as db:
-        player, _ = get_or_create_player(db, callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        ok, text, pet = catch_group_pet(db, callback.message.chat.id, player, event_id)
-        payload = pet_payload(pet) if pet else None
-    await callback.answer("Готово")
-    if ok and payload:
-        await answer_with_pet_media(callback.message, render_catch_card(player.first_name or "Игрок", payload), payload)
+    lock = acquire_redis_lock(f"cap:event:action:{event_id}", ttl_seconds=8)
+    if lock and not lock.acquired:
+        await callback.answer("Событие уже обрабатывается, жми без турбо-режима 😄", show_alert=False)
         return
-    await clean_answer(callback.message, text)
+    try:
+        with session_scope() as db:
+            player, _ = get_or_create_player(db, callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+            ok, text, pet = catch_group_pet(db, callback.message.chat.id, player, event_id)
+            payload = pet_payload(pet) if pet else None
+        await callback.answer("Готово")
+        if ok and payload:
+            await answer_with_pet_media(callback.message, render_catch_card(player.first_name or "Игрок", payload), payload)
+            return
+        await clean_answer(callback.message, text)
+    finally:
+        if lock:
+            lock.release()
 
 
 @router.callback_query(F.data.startswith("cap:boss_hit:"))
@@ -2032,14 +2079,22 @@ async def cb_boss_hit(callback: CallbackQuery) -> None:
         await callback.answer("Не получилось.", show_alert=True)
         return
     event_id = int(callback.data.split(":")[-1])
-    with session_scope() as db:
-        player, _ = get_or_create_player(db, callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
-        ok, text, data = hit_boss(db, callback.message.chat.id, player, event_id)
-    await callback.answer()
-    hp_line = ""
-    if data and data.get("hp", 0) > 0:
-        hp_line = f"\nHP босса: <b>{data['hp']}</b>/<b>{data['max_hp']}</b>"
-    await clean_answer(callback.message, text + hp_line, reply_markup=boss_keyboard(event_id) if data and data.get("hp", 0) > 0 else None)
+    lock = acquire_redis_lock(f"cap:event:action:{event_id}", ttl_seconds=8)
+    if lock and not lock.acquired:
+        await callback.answer("Удар уже считается. Босс в шоке, сервер тоже 😄", show_alert=False)
+        return
+    try:
+        with session_scope() as db:
+            player, _ = get_or_create_player(db, callback.from_user.id, callback.from_user.username, callback.from_user.first_name)
+            ok, text, data = hit_boss(db, callback.message.chat.id, player, event_id)
+        await callback.answer()
+        hp_line = ""
+        if data and data.get("hp", 0) > 0:
+            hp_line = f"\nHP босса: <b>{data['hp']}</b>/<b>{data['max_hp']}</b>"
+        await clean_answer(callback.message, text + hp_line, reply_markup=boss_keyboard(event_id) if data and data.get("hp", 0) > 0 else None)
+    finally:
+        if lock:
+            lock.release()
 
 
 @router.errors()
@@ -2078,37 +2133,87 @@ async def on_router_error(event: ErrorEvent) -> bool:
 
 async def group_event_loop(bot: Bot) -> None:
     settings = get_settings()
+    await asyncio.sleep(5)
     while True:
+        poll_seconds = max(20, int(settings.group_event_poll_seconds))
         try:
-            with session_scope() as db:
-                runtime_interval = get_config_int(db, "group_event_interval_minutes", settings.group_event_interval_minutes)
-            await asyncio.sleep(max(60, runtime_interval * 60))
-            with session_scope() as db:
-                runtime_interval = get_config_int(db, "group_event_interval_minutes", settings.group_event_interval_minutes)
-                groups = group_chats_for_events(db, limit=5, min_minutes=runtime_interval)
-                jobs = []
-                for group in groups:
-                    if group.messages_seen < 3:
-                        continue
-                    if group.players_seen < 1:
-                        continue
-                    if __import__("random").random() < 0.72:
-                        event = spawn_catch_event(db, group.chat_id, group.title)
-                        data = __import__("json").loads(event.data_json)
-                        species = data["species"]
-                        text = (
-                            f"✨ <b>В чат залетел редкий капсулик!</b>\n\n"
-                            f"{species['emoji']} <b>{h(species['name'])}</b>\n"
-                            f"Кто успеет — попробует поймать."
+            loop_lock = acquire_redis_lock("cap:events:loop", ttl_seconds=max(60, poll_seconds * 2))
+            if loop_lock and not loop_lock.acquired:
+                await asyncio.sleep(poll_seconds)
+                continue
+
+            jobs: list[tuple[str, int, str, int]] = []
+            try:
+                with session_scope() as db:
+                    runtime_interval = get_config_int(db, "group_event_interval_minutes", settings.group_event_interval_minutes)
+                    batch_size = max(1, get_config_int(db, "group_event_batch_size", settings.group_event_batch_size))
+                    max_events_per_group = max(1, min(2, get_config_int(db, "group_events_per_group", settings.group_events_per_group)))
+                    boss_cooldown_hours = max(1, get_config_int(db, "group_boss_interval_hours", settings.group_boss_interval_hours))
+                    expire_old_group_events(db)
+
+                    groups = group_chats_for_events(db, limit=batch_size, min_minutes=runtime_interval)
+                    for group in groups:
+                        if group.messages_seen < 3 or group.players_seen < 1:
+                            continue
+
+                        group_lock = acquire_redis_lock(
+                            f"cap:events:group:{group.chat_id}",
+                            ttl_seconds=max(30, int(settings.group_event_lock_seconds)),
                         )
-                        jobs.append(("catch", group.chat_id, text, event.id))
-                    else:
-                        event = spawn_boss_event(db, group.chat_id, group.title)
-                        data = __import__("json").loads(event.data_json)
-                        boss = data["boss"]
-                        text = f"🐲 <b>Босс появился!</b>\n\n{boss['emoji']} <b>{h(boss['name'])}</b>\nHP: <b>{boss['hp']}</b>"
-                        jobs.append(("boss", group.chat_id, text, event.id))
-                    mark_group_event_sent(group)
+                        if group_lock and not group_lock.acquired:
+                            continue
+                        try:
+                            active_catch = active_group_event(db, group.chat_id, "catch")
+                            active_boss = active_group_event(db, group.chat_id, "boss")
+                            active_count = int(active_catch is not None) + int(active_boss is not None)
+                            free_slots = max(0, max_events_per_group - active_count)
+                            if free_slots <= 0:
+                                continue
+
+                            candidates: list[str] = []
+                            if active_catch is None:
+                                candidates.append("catch")
+                            if active_boss is None:
+                                last_boss_at = last_group_event_at(db, group.chat_id, "boss")
+                                if last_boss_at is None or last_boss_at <= utcnow() - timedelta(hours=boss_cooldown_hours):
+                                    candidates.append("boss")
+                            if not candidates:
+                                continue
+
+                            if max_events_per_group == 1 and len(candidates) > 1:
+                                candidates = ["catch" if __import__("random").random() < 0.72 else "boss"]
+                            else:
+                                candidates = candidates[:free_slots]
+
+                            created = 0
+                            for kind in candidates:
+                                if kind == "catch":
+                                    event = spawn_catch_event(db, group.chat_id, group.title)
+                                    data = __import__("json").loads(event.data_json or "{}")
+                                    species = data.get("species") or {"emoji": "✨", "name": "Капсулик"}
+                                    text = (
+                                        f"✨ <b>В чат залетел редкий капсулик!</b>\n\n"
+                                        f"{species['emoji']} <b>{h(species['name'])}</b>\n"
+                                        f"Кто успеет — попробует поймать."
+                                    )
+                                    jobs.append(("catch", group.chat_id, text, event.id))
+                                    created += 1
+                                elif kind == "boss":
+                                    event = spawn_boss_event(db, group.chat_id, group.title)
+                                    data = __import__("json").loads(event.data_json or "{}")
+                                    boss = data.get("boss") or {"emoji": "🐲", "name": "Босс", "hp": data.get("hp", 1)}
+                                    text = f"🐲 <b>Босс появился!</b>\n\n{boss['emoji']} <b>{h(boss['name'])}</b>\nHP: <b>{data.get('hp', boss.get('hp', 1))}</b>"
+                                    jobs.append(("boss", group.chat_id, text, event.id))
+                                    created += 1
+                            if created:
+                                mark_group_event_sent(group)
+                        finally:
+                            if group_lock:
+                                group_lock.release()
+            finally:
+                if loop_lock:
+                    loop_lock.release()
+
             for kind, chat_id, text, event_id in jobs:
                 try:
                     if kind == "catch":
@@ -2122,6 +2227,7 @@ async def group_event_loop(bot: Bot) -> None:
         except Exception as exc:
             store_runtime_error("group_event_loop", exc)
             logger.exception("group event loop failed")
+        await asyncio.sleep(poll_seconds)
 
 
 
@@ -2234,4 +2340,5 @@ async def run_bot_polling() -> None:
                 await task
             except asyncio.CancelledError:
                 pass
+        close_redis()
         await bot.session.close()

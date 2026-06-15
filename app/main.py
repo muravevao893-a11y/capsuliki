@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.bot import run_bot_polling
 from app.config import get_settings
-from app.db import init_db
+from app.db import database_status, init_db
 from app.web import router as api_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
@@ -29,6 +29,7 @@ async def lifespan(app: FastAPI):
     global _bot_task
     settings = get_settings()
     logger.info("Starting Capsuliki service: host=%s port=%s polling=%s", settings.host, settings.port, settings.run_bot_polling)
+    logger.info("Database config: %s", database_status())
     init_db()
     logger.info("Database initialized")
 
@@ -49,7 +50,7 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Капсулики Bot", description="Telegram capsule-pet collection game bot.", version="1.2", lifespan=lifespan)
+    app = FastAPI(title="Капсулики Bot", description="Telegram capsule-pet collection game bot.", version="1.3-postgres", lifespan=lifespan)
     app.include_router(api_router)
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 

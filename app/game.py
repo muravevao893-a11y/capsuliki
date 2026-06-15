@@ -11,6 +11,7 @@ from sqlalchemy import desc, func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.db import database_status
 from app.models import ActionLog, AppConfig, ErrorLog, EventStatus, Expedition, GroupChat, GroupEvent, Pet, Player, Rarity, StarPurchase, Trade, TradeStatus, utcnow
 
 
@@ -75,6 +76,9 @@ CONFIG_KEYS: dict[str, dict[str, Any]] = {
     "expedition_daily_limit": {"type": "int", "default": "5", "title": "Expeditions per day"},
     "group_catch_daily_limit": {"type": "int", "default": "10", "title": "Group catches per day"},
     "group_event_interval_minutes": {"type": "int", "default": "45", "title": "Group event interval"},
+    "group_event_batch_size": {"type": "int", "default": "10", "title": "Groups per event tick"},
+    "group_events_per_group": {"type": "int", "default": "2", "title": "Max active event types per group"},
+    "group_boss_interval_hours": {"type": "int", "default": "24", "title": "Boss cooldown hours"},
 }
 
 
@@ -399,6 +403,7 @@ def admin_health_payload(db: Session) -> dict[str, Any]:
     settings = get_settings()
     return {
         "database": "ok",
+        "database_info": database_status(),
         "maintenance": bool(settings.maintenance_mode),
         "players": int(db.scalar(select(func.count(Player.id))) or 0),
         "banned": int(db.scalar(select(func.count(Player.id)).where(Player.is_banned == 1)) or 0),
@@ -1125,11 +1130,39 @@ def accept_trade(db: Session, player: Player, trade_id: int) -> tuple[bool, str]
     return True, "Обмен завершён."
 
 
+def expire_old_group_events(db: Session, chat_id: int | None = None) -> int:
+    now = utcnow()
+    q = select(GroupEvent).where(
+        GroupEvent.status == EventStatus.ACTIVE.value,
+        GroupEvent.finishes_at.is_not(None),
+        GroupEvent.finishes_at <= now,
+    )
+    if chat_id is not None:
+        q = q.where(GroupEvent.chat_id == chat_id)
+    events = db.scalars(q).all()
+    for event in events:
+        event.status = EventStatus.FINISHED.value
+    if events:
+        db.flush()
+    return len(events)
+
+
 def active_group_event(db: Session, chat_id: int, event_type: str | None = None) -> GroupEvent | None:
+    expire_old_group_events(db, chat_id)
     q = select(GroupEvent).where(GroupEvent.chat_id == chat_id, GroupEvent.status == EventStatus.ACTIVE.value)
     if event_type:
         q = q.where(GroupEvent.event_type == event_type)
     return db.scalar(q.order_by(desc(GroupEvent.created_at)))
+
+
+def last_group_event_at(db: Session, chat_id: int, event_type: str) -> datetime | None:
+    event = db.scalar(
+        select(GroupEvent)
+        .where(GroupEvent.chat_id == chat_id, GroupEvent.event_type == event_type)
+        .order_by(desc(GroupEvent.created_at))
+        .limit(1)
+    )
+    return aware(event.created_at) if event else None
 
 
 def spawn_catch_event(db: Session, chat_id: int, chat_title: str) -> GroupEvent:

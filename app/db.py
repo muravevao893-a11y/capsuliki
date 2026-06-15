@@ -30,7 +30,7 @@ def _engine_kwargs() -> dict:
     return {"pool_pre_ping": True}
 
 
-engine = create_engine(settings.database_url, future=True, **_engine_kwargs())
+engine = create_engine(settings.database_url, future=True, echo=settings.db_echo, **_engine_kwargs())
 
 if settings.is_sqlite:
     @event.listens_for(engine, "connect")
@@ -44,6 +44,23 @@ if settings.is_sqlite:
 
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expire_on_commit=False, future=True)
+
+
+def database_status() -> dict[str, str]:
+    return {
+        "kind": settings.database_kind,
+        "url": settings.safe_database_url,
+        "driver": engine.url.drivername,
+    }
+
+
+def ping_database() -> bool:
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return True
+    except Exception:
+        return False
 
 def _add_column_if_missing(table: str, column: str, ddl: str) -> None:
     inspector = inspect(engine)
